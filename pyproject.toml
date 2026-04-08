@@ -39,6 +39,11 @@ Repository = "https://github.com/aigc-apps/VideoX-Fun"
 [tool.setuptools]
 packages = ["videox_fun"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["comfyui", "videox_fun", ".venv"]
+addopts = "--confcutdir=tests"
+
 [tool.comfy]
 PublisherId = "bubbliiiing"
 DisplayName = "VideoX-Fun"
