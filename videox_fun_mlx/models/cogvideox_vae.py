@@ -19,7 +19,8 @@ All tensors use channels-last layout: (B, D, H, W, C).
 Original PyTorch code uses channels-first: (B, C, D, H, W).
 """
 
-from typing import Dict, Optional, Tuple, Union
+import math
+from typing import Dict, List, Optional, Tuple, Union
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -504,3 +505,752 @@ class CogVideoXResnetBlock3D(nn.Module):
 
         hidden_states = hidden_states + inputs
         return hidden_states, new_conv_cache
+
+
+class CogVideoXDownsample3D(nn.Module):
+    """A 3D downsampling layer for CogVideoX using strided convolution.
+
+    Mirrors diffusers ``CogVideoXDownsample3D``.  When *compress_time* is
+    ``True`` the temporal dimension is also halved (stride 2-2-2); otherwise
+    only the spatial dimensions are halved (stride 1-2-2).
+
+    Args:
+        in_channels: Number of input channels.
+        out_channels: Number of output channels.
+        kernel_size: Size of the convolving kernel (default 3).
+        stride: Base spatial stride (default 2).
+        padding: Padding applied to all spatial dims (default 0).
+        compress_time: Whether to stride along the temporal axis as well.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int = 3,
+        stride: int = 2,
+        padding: int = 0,
+        compress_time: bool = False,
+    ) -> None:
+        super().__init__()
+        self.compress_time = compress_time
+
+        if compress_time:
+            conv_stride = (stride, stride, stride)
+        else:
+            conv_stride = (1, stride, stride)
+
+        self.conv = nn.Conv3d(
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            stride=conv_stride,
+            padding=padding,
+            bias=True,
+        )
+        self.padding = padding
+        self.kernel_size = kernel_size
+
+    def __call__(self, inputs: mx.array) -> mx.array:
+        """Forward pass.
+
+        Args:
+            inputs: (B, D, H, W, C) channels-last tensor.
+
+        Returns:
+            Downsampled tensor.
+        """
+        # Pad to preserve spatial dims the same way as diffusers:
+        # pad = kernel_size - 1 on all sides, then stride takes effect
+        pad_amt = self.kernel_size - 1 - self.padding
+        t_pad = pad_amt if self.compress_time else (self.kernel_size - 1) // 2
+        s_pad = pad_amt
+
+        # For temporal dimension, use asymmetric causal-style padding
+        # (pad before, not after) to mirror diffusers behavior
+        # Actually diffusers pads symmetrically for downsample
+        t_pad_before = t_pad // 2
+        t_pad_after = t_pad - t_pad_before
+        s_pad_before = s_pad // 2
+        s_pad_after = s_pad - s_pad_before
+
+        if t_pad > 0 or s_pad > 0:
+            inputs = mx.pad(
+                inputs,
+                [
+                    (0, 0),
+                    (t_pad_before, t_pad_after),
+                    (s_pad_before, s_pad_after),
+                    (s_pad_before, s_pad_after),
+                    (0, 0),
+                ],
+            )
+
+        return self.conv(inputs)
+
+
+class CogVideoXDownBlock3D(nn.Module):
+    """A downsampling block used in the CogVideoX model.
+
+    Contains a sequence of ResnetBlock3D layers followed by an optional
+    CogVideoXDownsample3D.
+
+    Args:
+        in_channels: Number of input channels.
+        out_channels: Number of output channels.
+        temb_channels: Number of time embedding channels.
+        dropout: Dropout rate.
+        num_layers: Number of resnet layers.
+        resnet_eps: Epsilon for normalization layers.
+        resnet_act_fn: Activation function name.
+        resnet_groups: Number of groups for group normalization.
+        add_downsample: Whether to add a downsampling layer.
+        downsample_padding: Padding for the downsampler.
+        compress_time: Whether to downsample the temporal dimension.
+        pad_mode: Padding mode for causal convolutions.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        temb_channels: int,
+        dropout: float = 0.0,
+        num_layers: int = 1,
+        resnet_eps: float = 1e-6,
+        resnet_act_fn: str = "swish",
+        resnet_groups: int = 32,
+        add_downsample: bool = True,
+        downsample_padding: int = 0,
+        compress_time: bool = False,
+        pad_mode: str = "first",
+    ):
+        super().__init__()
+
+        resnets = []
+        for i in range(num_layers):
+            in_channel = in_channels if i == 0 else out_channels
+            resnets.append(
+                CogVideoXResnetBlock3D(
+                    in_channels=in_channel,
+                    out_channels=out_channels,
+                    dropout=dropout,
+                    temb_channels=temb_channels,
+                    groups=resnet_groups,
+                    eps=resnet_eps,
+                    non_linearity=resnet_act_fn,
+                    pad_mode=pad_mode,
+                )
+            )
+
+        self.resnets = resnets
+        self.downsamplers = None
+
+        if add_downsample:
+            self.downsamplers = [
+                CogVideoXDownsample3D(
+                    out_channels,
+                    out_channels,
+                    padding=downsample_padding,
+                    compress_time=compress_time,
+                )
+            ]
+
+    def __call__(
+        self,
+        hidden_states: mx.array,
+        temb: Optional[mx.array] = None,
+        zq: Optional[mx.array] = None,
+        conv_cache: Optional[Dict[str, mx.array]] = None,
+    ) -> Tuple[mx.array, Dict[str, mx.array]]:
+        """Forward pass.
+
+        Args:
+            hidden_states: (B, D, H, W, C) tensor.
+            temb: Optional time embedding.
+            zq: Optional spatial norm conditioning tensor.
+            conv_cache: Optional dict of conv caches.
+
+        Returns:
+            Tuple of (output, new_conv_cache).
+        """
+        new_conv_cache: Dict[str, mx.array] = {}
+        conv_cache = conv_cache or {}
+
+        for i, resnet in enumerate(self.resnets):
+            conv_cache_key = f"resnet_{i}"
+            hidden_states, new_conv_cache[conv_cache_key] = resnet(
+                hidden_states, temb, zq, conv_cache=conv_cache.get(conv_cache_key)
+            )
+
+        if self.downsamplers is not None:
+            for downsampler in self.downsamplers:
+                hidden_states = downsampler(hidden_states)
+
+        return hidden_states, new_conv_cache
+
+
+class CogVideoXMidBlock3D(nn.Module):
+    """A middle block used in the CogVideoX model.
+
+    Contains a sequence of ResnetBlock3D layers with no up/downsampling.
+
+    Args:
+        in_channels: Number of input channels.
+        temb_channels: Number of time embedding channels.
+        dropout: Dropout rate.
+        num_layers: Number of resnet layers.
+        resnet_eps: Epsilon for normalization layers.
+        resnet_act_fn: Activation function name.
+        resnet_groups: Number of groups for group normalization.
+        spatial_norm_dim: Dimension for spatial norm (if used).
+        pad_mode: Padding mode for causal convolutions.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        temb_channels: int,
+        dropout: float = 0.0,
+        num_layers: int = 1,
+        resnet_eps: float = 1e-6,
+        resnet_act_fn: str = "swish",
+        resnet_groups: int = 32,
+        spatial_norm_dim: Optional[int] = None,
+        pad_mode: str = "first",
+    ):
+        super().__init__()
+
+        resnets = []
+        for _ in range(num_layers):
+            resnets.append(
+                CogVideoXResnetBlock3D(
+                    in_channels=in_channels,
+                    out_channels=in_channels,
+                    dropout=dropout,
+                    temb_channels=temb_channels,
+                    groups=resnet_groups,
+                    eps=resnet_eps,
+                    spatial_norm_dim=spatial_norm_dim,
+                    non_linearity=resnet_act_fn,
+                    pad_mode=pad_mode,
+                )
+            )
+        self.resnets = resnets
+
+    def __call__(
+        self,
+        hidden_states: mx.array,
+        temb: Optional[mx.array] = None,
+        zq: Optional[mx.array] = None,
+        conv_cache: Optional[Dict[str, mx.array]] = None,
+    ) -> Tuple[mx.array, Dict[str, mx.array]]:
+        """Forward pass.
+
+        Args:
+            hidden_states: (B, D, H, W, C) tensor.
+            temb: Optional time embedding.
+            zq: Optional spatial norm conditioning tensor.
+            conv_cache: Optional dict of conv caches.
+
+        Returns:
+            Tuple of (output, new_conv_cache).
+        """
+        new_conv_cache: Dict[str, mx.array] = {}
+        conv_cache = conv_cache or {}
+
+        for i, resnet in enumerate(self.resnets):
+            conv_cache_key = f"resnet_{i}"
+            hidden_states, new_conv_cache[conv_cache_key] = resnet(
+                hidden_states, temb, zq, conv_cache=conv_cache.get(conv_cache_key)
+            )
+
+        return hidden_states, new_conv_cache
+
+
+class CogVideoXUpBlock3D(nn.Module):
+    """An upsampling block used in the CogVideoX model.
+
+    Contains a sequence of ResnetBlock3D layers followed by an optional
+    CogVideoXUpsample3D.
+
+    Args:
+        in_channels: Number of input channels.
+        out_channels: Number of output channels.
+        temb_channels: Number of time embedding channels.
+        dropout: Dropout rate.
+        num_layers: Number of resnet layers.
+        resnet_eps: Epsilon for normalization layers.
+        resnet_act_fn: Activation function name.
+        resnet_groups: Number of groups for group normalization.
+        spatial_norm_dim: Dimension for spatial norm (if used).
+        add_upsample: Whether to add an upsampling layer.
+        upsample_padding: Padding for the upsampler conv.
+        compress_time: Whether to upsample the temporal dimension.
+        pad_mode: Padding mode for causal convolutions.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        temb_channels: int,
+        dropout: float = 0.0,
+        num_layers: int = 1,
+        resnet_eps: float = 1e-6,
+        resnet_act_fn: str = "swish",
+        resnet_groups: int = 32,
+        spatial_norm_dim: int = 16,
+        add_upsample: bool = True,
+        upsample_padding: int = 1,
+        compress_time: bool = False,
+        pad_mode: str = "first",
+    ):
+        super().__init__()
+
+        resnets = []
+        for i in range(num_layers):
+            in_channel = in_channels if i == 0 else out_channels
+            resnets.append(
+                CogVideoXResnetBlock3D(
+                    in_channels=in_channel,
+                    out_channels=out_channels,
+                    dropout=dropout,
+                    temb_channels=temb_channels,
+                    groups=resnet_groups,
+                    eps=resnet_eps,
+                    non_linearity=resnet_act_fn,
+                    spatial_norm_dim=spatial_norm_dim,
+                    pad_mode=pad_mode,
+                )
+            )
+
+        self.resnets = resnets
+        self.upsamplers = None
+
+        if add_upsample:
+            self.upsamplers = [
+                CogVideoXUpsample3D(
+                    out_channels,
+                    out_channels,
+                    padding=upsample_padding,
+                    compress_time=compress_time,
+                )
+            ]
+
+    def __call__(
+        self,
+        hidden_states: mx.array,
+        temb: Optional[mx.array] = None,
+        zq: Optional[mx.array] = None,
+        conv_cache: Optional[Dict[str, mx.array]] = None,
+    ) -> Tuple[mx.array, Dict[str, mx.array]]:
+        """Forward pass.
+
+        Args:
+            hidden_states: (B, D, H, W, C) tensor.
+            temb: Optional time embedding.
+            zq: Optional spatial norm conditioning tensor.
+            conv_cache: Optional dict of conv caches.
+
+        Returns:
+            Tuple of (output, new_conv_cache).
+        """
+        new_conv_cache: Dict[str, mx.array] = {}
+        conv_cache = conv_cache or {}
+
+        for i, resnet in enumerate(self.resnets):
+            conv_cache_key = f"resnet_{i}"
+            hidden_states, new_conv_cache[conv_cache_key] = resnet(
+                hidden_states, temb, zq, conv_cache=conv_cache.get(conv_cache_key)
+            )
+
+        if self.upsamplers is not None:
+            for upsampler in self.upsamplers:
+                hidden_states = upsampler(hidden_states)
+
+        return hidden_states, new_conv_cache
+
+
+class CogVideoXEncoder3D(nn.Module):
+    """The encoder of a CogVideoX variational autoencoder.
+
+    Architecture: conv_in -> down_blocks -> mid_block -> norm_out -> conv_out.
+    Outputs ``2 * out_channels`` (mean + logvar).
+
+    Args:
+        in_channels: Number of input channels (e.g. 3 for RGB).
+        out_channels: Number of latent channels.
+        down_block_types: Tuple of down block type strings.
+        block_out_channels: Tuple of output channels for each block.
+        layers_per_block: Number of resnet layers per block.
+        act_fn: Activation function name.
+        norm_eps: Epsilon for normalization.
+        norm_num_groups: Number of groups for group normalization.
+        dropout: Dropout rate.
+        pad_mode: Padding mode for causal convolutions.
+        temporal_compression_ratio: Ratio of temporal compression.
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 3,
+        out_channels: int = 16,
+        down_block_types: Tuple[str, ...] = (
+            "CogVideoXDownBlock3D",
+            "CogVideoXDownBlock3D",
+            "CogVideoXDownBlock3D",
+            "CogVideoXDownBlock3D",
+        ),
+        block_out_channels: Tuple[int, ...] = (128, 256, 256, 512),
+        layers_per_block: int = 3,
+        act_fn: str = "silu",
+        norm_eps: float = 1e-6,
+        norm_num_groups: int = 32,
+        dropout: float = 0.0,
+        pad_mode: str = "first",
+        temporal_compression_ratio: float = 4,
+    ):
+        super().__init__()
+
+        temporal_compress_level = int(math.log2(temporal_compression_ratio))
+
+        self.conv_in = CogVideoXCausalConv3d(
+            in_channels, block_out_channels[0], kernel_size=3, pad_mode=pad_mode
+        )
+        self.down_blocks: List[CogVideoXDownBlock3D] = []
+
+        # Down blocks
+        output_channel = block_out_channels[0]
+        for i, down_block_type in enumerate(down_block_types):
+            input_channel = output_channel
+            output_channel = block_out_channels[i]
+            is_final_block = i == len(block_out_channels) - 1
+            compress_time = i < temporal_compress_level
+
+            if down_block_type != "CogVideoXDownBlock3D":
+                raise ValueError(
+                    "Invalid `down_block_type`. Must be `CogVideoXDownBlock3D`"
+                )
+
+            down_block = CogVideoXDownBlock3D(
+                in_channels=input_channel,
+                out_channels=output_channel,
+                temb_channels=0,
+                dropout=dropout,
+                num_layers=layers_per_block,
+                resnet_eps=norm_eps,
+                resnet_act_fn=act_fn,
+                resnet_groups=norm_num_groups,
+                add_downsample=not is_final_block,
+                compress_time=compress_time,
+            )
+            self.down_blocks.append(down_block)
+
+        # Mid block
+        self.mid_block = CogVideoXMidBlock3D(
+            in_channels=block_out_channels[-1],
+            temb_channels=0,
+            dropout=dropout,
+            num_layers=2,
+            resnet_eps=norm_eps,
+            resnet_act_fn=act_fn,
+            resnet_groups=norm_num_groups,
+            pad_mode=pad_mode,
+        )
+
+        self.norm_out = nn.GroupNorm(
+            norm_num_groups, block_out_channels[-1], pytorch_compatible=True
+        )
+        self.conv_act = nn.SiLU()
+        self.conv_out = CogVideoXCausalConv3d(
+            block_out_channels[-1], 2 * out_channels, kernel_size=3, pad_mode=pad_mode
+        )
+
+    def __call__(
+        self,
+        sample: mx.array,
+        temb: Optional[mx.array] = None,
+        conv_cache: Optional[Dict[str, mx.array]] = None,
+    ) -> Tuple[mx.array, Dict[str, mx.array]]:
+        """Forward pass.
+
+        Args:
+            sample: (B, D, H, W, C) input tensor.
+            temb: Optional time embedding.
+            conv_cache: Optional dict of conv caches.
+
+        Returns:
+            Tuple of (output, new_conv_cache). Output has ``2 * out_channels``
+            channels (mean + logvar).
+        """
+        new_conv_cache: Dict[str, mx.array] = {}
+        conv_cache = conv_cache or {}
+
+        hidden_states, new_conv_cache["conv_in"] = self.conv_in(
+            sample, conv_cache=conv_cache.get("conv_in")
+        )
+
+        # 1. Down
+        for i, down_block in enumerate(self.down_blocks):
+            conv_cache_key = f"down_block_{i}"
+            hidden_states, new_conv_cache[conv_cache_key] = down_block(
+                hidden_states, temb, None, conv_cache=conv_cache.get(conv_cache_key)
+            )
+
+        # 2. Mid
+        hidden_states, new_conv_cache["mid_block"] = self.mid_block(
+            hidden_states, temb, None, conv_cache=conv_cache.get("mid_block")
+        )
+
+        # 3. Post-process
+        hidden_states = self.norm_out(hidden_states)
+        hidden_states = self.conv_act(hidden_states)
+        hidden_states, new_conv_cache["conv_out"] = self.conv_out(
+            hidden_states, conv_cache=conv_cache.get("conv_out")
+        )
+
+        return hidden_states, new_conv_cache
+
+
+class CogVideoXDecoder3D(nn.Module):
+    """The decoder of a CogVideoX variational autoencoder.
+
+    Architecture: conv_in -> mid_block -> up_blocks -> norm_out -> conv_out.
+    Uses spatial norm conditioning from the latent input throughout.
+
+    Args:
+        in_channels: Number of latent channels.
+        out_channels: Number of output channels (e.g. 3 for RGB).
+        up_block_types: Tuple of up block type strings.
+        block_out_channels: Tuple of output channels for each block.
+        layers_per_block: Number of resnet layers per block.
+        act_fn: Activation function name.
+        norm_eps: Epsilon for normalization.
+        norm_num_groups: Number of groups for group normalization.
+        dropout: Dropout rate.
+        pad_mode: Padding mode for causal convolutions.
+        temporal_compression_ratio: Ratio of temporal compression.
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 16,
+        out_channels: int = 3,
+        up_block_types: Tuple[str, ...] = (
+            "CogVideoXUpBlock3D",
+            "CogVideoXUpBlock3D",
+            "CogVideoXUpBlock3D",
+            "CogVideoXUpBlock3D",
+        ),
+        block_out_channels: Tuple[int, ...] = (128, 256, 256, 512),
+        layers_per_block: int = 3,
+        act_fn: str = "silu",
+        norm_eps: float = 1e-6,
+        norm_num_groups: int = 32,
+        dropout: float = 0.0,
+        pad_mode: str = "first",
+        temporal_compression_ratio: float = 4,
+    ):
+        super().__init__()
+
+        reversed_block_out_channels = list(reversed(block_out_channels))
+
+        self.conv_in = CogVideoXCausalConv3d(
+            in_channels, reversed_block_out_channels[0], kernel_size=3, pad_mode=pad_mode
+        )
+
+        # Mid block (with spatial norm conditioned on latent)
+        self.mid_block = CogVideoXMidBlock3D(
+            in_channels=reversed_block_out_channels[0],
+            temb_channels=0,
+            num_layers=2,
+            resnet_eps=norm_eps,
+            resnet_act_fn=act_fn,
+            resnet_groups=norm_num_groups,
+            spatial_norm_dim=in_channels,
+            pad_mode=pad_mode,
+        )
+
+        # Up blocks
+        self.up_blocks: List[CogVideoXUpBlock3D] = []
+
+        output_channel = reversed_block_out_channels[0]
+        temporal_compress_level = int(math.log2(temporal_compression_ratio))
+
+        for i, up_block_type in enumerate(up_block_types):
+            prev_output_channel = output_channel
+            output_channel = reversed_block_out_channels[i]
+            is_final_block = i == len(block_out_channels) - 1
+            compress_time = i < temporal_compress_level
+
+            if up_block_type != "CogVideoXUpBlock3D":
+                raise ValueError(
+                    "Invalid `up_block_type`. Must be `CogVideoXUpBlock3D`"
+                )
+
+            up_block = CogVideoXUpBlock3D(
+                in_channels=prev_output_channel,
+                out_channels=output_channel,
+                temb_channels=0,
+                dropout=dropout,
+                num_layers=layers_per_block + 1,
+                resnet_eps=norm_eps,
+                resnet_act_fn=act_fn,
+                resnet_groups=norm_num_groups,
+                spatial_norm_dim=in_channels,
+                add_upsample=not is_final_block,
+                compress_time=compress_time,
+                pad_mode=pad_mode,
+            )
+            self.up_blocks.append(up_block)
+
+        self.norm_out = CogVideoXSpatialNorm3D(
+            reversed_block_out_channels[-1], in_channels, groups=norm_num_groups
+        )
+        self.conv_act = nn.SiLU()
+        self.conv_out = CogVideoXCausalConv3d(
+            reversed_block_out_channels[-1], out_channels, kernel_size=3, pad_mode=pad_mode
+        )
+
+    def __call__(
+        self,
+        sample: mx.array,
+        temb: Optional[mx.array] = None,
+        conv_cache: Optional[Dict[str, mx.array]] = None,
+    ) -> Tuple[mx.array, Dict[str, mx.array]]:
+        """Forward pass.
+
+        Args:
+            sample: (B, D, H, W, C) latent tensor.
+            temb: Optional time embedding.
+            conv_cache: Optional dict of conv caches.
+
+        Returns:
+            Tuple of (output, new_conv_cache).
+        """
+        new_conv_cache: Dict[str, mx.array] = {}
+        conv_cache = conv_cache or {}
+
+        hidden_states, new_conv_cache["conv_in"] = self.conv_in(
+            sample, conv_cache=conv_cache.get("conv_in")
+        )
+
+        # 1. Mid
+        hidden_states, new_conv_cache["mid_block"] = self.mid_block(
+            hidden_states, temb, sample, conv_cache=conv_cache.get("mid_block")
+        )
+
+        # 2. Up
+        for i, up_block in enumerate(self.up_blocks):
+            conv_cache_key = f"up_block_{i}"
+            hidden_states, new_conv_cache[conv_cache_key] = up_block(
+                hidden_states, temb, sample, conv_cache=conv_cache.get(conv_cache_key)
+            )
+
+        # 3. Post-process
+        hidden_states, new_conv_cache["norm_out"] = self.norm_out(
+            hidden_states, sample, conv_cache=conv_cache.get("norm_out")
+        )
+        hidden_states = self.conv_act(hidden_states)
+        hidden_states, new_conv_cache["conv_out"] = self.conv_out(
+            hidden_states, conv_cache=conv_cache.get("conv_out")
+        )
+
+        return hidden_states, new_conv_cache
+
+
+class AutoencoderKLCogVideoX(nn.Module):
+    """VAE model with KL loss for CogVideoX.
+
+    Encodes video into latents and decodes latent representations back.
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 3,
+        out_channels: int = 3,
+        down_block_types: Tuple[str, ...] = (
+            "CogVideoXDownBlock3D",
+            "CogVideoXDownBlock3D",
+            "CogVideoXDownBlock3D",
+            "CogVideoXDownBlock3D",
+        ),
+        up_block_types: Tuple[str, ...] = (
+            "CogVideoXUpBlock3D",
+            "CogVideoXUpBlock3D",
+            "CogVideoXUpBlock3D",
+            "CogVideoXUpBlock3D",
+        ),
+        block_out_channels: Tuple[int, ...] = (128, 256, 256, 512),
+        latent_channels: int = 16,
+        layers_per_block: int = 3,
+        act_fn: str = "silu",
+        norm_eps: float = 1e-6,
+        norm_num_groups: int = 32,
+        temporal_compression_ratio: float = 4,
+        scaling_factor: float = 1.15258426,
+        shift_factor: Optional[float] = None,
+        **kwargs,
+    ):
+        super().__init__()
+        self.scaling_factor = scaling_factor
+        self.shift_factor = shift_factor
+
+        self.encoder = CogVideoXEncoder3D(
+            in_channels=in_channels,
+            out_channels=latent_channels,
+            down_block_types=down_block_types,
+            block_out_channels=block_out_channels,
+            layers_per_block=layers_per_block,
+            act_fn=act_fn,
+            norm_eps=norm_eps,
+            norm_num_groups=norm_num_groups,
+            temporal_compression_ratio=temporal_compression_ratio,
+        )
+        self.decoder = CogVideoXDecoder3D(
+            in_channels=latent_channels,
+            out_channels=out_channels,
+            up_block_types=up_block_types,
+            block_out_channels=block_out_channels,
+            layers_per_block=layers_per_block,
+            act_fn=act_fn,
+            norm_eps=norm_eps,
+            norm_num_groups=norm_num_groups,
+            temporal_compression_ratio=temporal_compression_ratio,
+        )
+
+    def encode(self, x: mx.array):
+        from videox_fun_mlx.utils import DiagonalGaussianDistribution
+        h, _ = self.encoder(x)
+        return DiagonalGaussianDistribution(h)
+
+    def decode(self, z: mx.array) -> mx.array:
+        dec, _ = self.decoder(z)
+        return dec
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_path: str, subfolder: str = None):
+        import os
+        from videox_fun_mlx.utils import load_config, load_weights, convert_pytorch_weights
+
+        if subfolder:
+            pretrained_model_path = os.path.join(pretrained_model_path, subfolder)
+
+        config = load_config(pretrained_model_path)
+        init_keys = {
+            "in_channels", "out_channels", "down_block_types", "up_block_types",
+            "block_out_channels", "latent_channels", "layers_per_block", "act_fn",
+            "norm_eps", "norm_num_groups", "temporal_compression_ratio",
+            "scaling_factor", "shift_factor",
+        }
+        filtered_config = {k: v for k, v in config.items() if k in init_keys}
+        for k in ("down_block_types", "up_block_types", "block_out_channels"):
+            if k in filtered_config and isinstance(filtered_config[k], list):
+                filtered_config[k] = tuple(filtered_config[k])
+
+        model = cls(**filtered_config)
+        weights = load_weights(pretrained_model_path)
+        weights = convert_pytorch_weights(weights)
+        model.load_weights(list(weights.items()))
+        return model
