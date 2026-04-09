@@ -27,7 +27,9 @@ def test_vae(model_path: str):
     vae = AutoencoderKLCogVideoX.from_pretrained(model_path, subfolder="vae")
     print(f"  Loaded in {time.monotonic() - t0:.1f}s")
 
-    param_count = sum(p.size for _, p in vae.parameters().items())
+    import mlx.nn
+    leaves = mlx.nn.utils.tree_flatten(vae.trainable_parameters())
+    param_count = sum(v.size for _, v in leaves)
     print(f"  Parameters: {param_count / 1e6:.1f}M")
 
     print("\n  Testing encode...")
@@ -62,13 +64,18 @@ def test_transformer(model_path: str):
     )
     print(f"  Loaded in {time.monotonic() - t0:.1f}s")
 
-    print("\n  Testing forward pass...")
-    hidden = mx.random.normal((1, 2, 16, 8, 8))
-    encoder = mx.random.normal((1, 226, 4096))
+    # Build test inputs matching the model config
+    cfg = transformer._config
+    in_ch = 16  # base latent channels
+    print(f"\n  Testing forward pass (in_channels from config: {cfg})...")
+    hidden = mx.random.normal((1, 2, in_ch, 8, 8))  # (B, F, C, H, W)
+    encoder = mx.random.normal((1, 16, 4096))         # shorter text for speed
     timestep = mx.array([500.0])
+    # Inpaint latents: mask(1) + masked_video(16) = 17 channels
+    inpaint = mx.random.normal((1, 2, 17, 8, 8))
 
     t0 = time.monotonic()
-    out = transformer(hidden, encoder, timestep)
+    out = transformer(hidden, encoder, timestep, inpaint_latents=inpaint)
     mx.eval(out)
     print(f"  Forward: {hidden.shape} -> {out.shape} ({time.monotonic() - t0:.1f}s)")
 

@@ -33,7 +33,6 @@ class CogVideoXLayerNormZero(nn.Module):
     ):
         super().__init__()
         self.norm = nn.LayerNorm(embedding_dim, eps=eps, affine=elementwise_affine)
-        self.norm_enc = nn.LayerNorm(embedding_dim, eps=eps, affine=elementwise_affine)
         self.linear = nn.Linear(conditioning_dim, 6 * embedding_dim, bias=bias)
 
     def __call__(self, hidden_states, encoder_hidden_states, temb):
@@ -43,7 +42,7 @@ class CogVideoXLayerNormZero(nn.Module):
             mod = mx.expand_dims(mod, 1)
         shift_h, scale_h, gate_h, shift_e, scale_e, gate_e = mx.split(mod, 6, axis=-1)
         h = self.norm(hidden_states) * (1 + scale_h) + shift_h
-        e = self.norm_enc(encoder_hidden_states) * (1 + scale_e) + shift_e
+        e = self.norm(encoder_hidden_states) * (1 + scale_e) + shift_e
         return h, e, gate_h, gate_e
 
 
@@ -69,21 +68,63 @@ class AdaLayerNorm(nn.Module):
 # Feed-forward
 # ---------------------------------------------------------------------------
 
-class FeedForward(nn.Module):
-    """GEGLU-style feed-forward network."""
+class _GELUApprox(nn.Module):
+    """GELU activation with linear projection (diffusers GELU wrapper)."""
 
-    def __init__(self, dim: int, inner_dim: int = 0, dropout: float = 0.0, bias: bool = True):
+    def __init__(self, dim_in: int, dim_out: int, bias: bool = True):
         super().__init__()
-        inner_dim = inner_dim or 4 * dim
-        # GEGLU: project to 2x inner_dim, split, gate
-        self.proj_in = nn.Linear(dim, inner_dim * 2, bias=bias)
-        self.proj_out = nn.Linear(inner_dim, dim, bias=bias)
+        self.proj = nn.Linear(dim_in, dim_out, bias=bias)
 
     def __call__(self, x):
-        h = self.proj_in(x)
+        return nn.gelu_approx(self.proj(x))
+
+
+class _GEGLU(nn.Module):
+    """GEGLU activation with linear projection."""
+
+    def __init__(self, dim_in: int, dim_out: int, bias: bool = True):
+        super().__init__()
+        self.proj = nn.Linear(dim_in, dim_out * 2, bias=bias)
+
+    def __call__(self, x):
+        h = self.proj(x)
         gate, value = mx.split(h, 2, axis=-1)
-        h = nn.gelu_approx(gate) * value
-        return self.proj_out(h)
+        return nn.gelu_approx(gate) * value
+
+
+class FeedForward(nn.Module):
+    """Feed-forward network matching diffusers naming convention.
+
+    Weight keys: net.0.proj.weight, net.2.weight.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        inner_dim: int = 0,
+        dropout: float = 0.0,
+        bias: bool = True,
+        activation_fn: str = "gelu-approximate",
+    ):
+        super().__init__()
+        inner_dim = inner_dim or 4 * dim
+
+        if activation_fn == "geglu":
+            act = _GEGLU(dim, inner_dim, bias=bias)
+        else:
+            # "gelu-approximate" or default
+            act = _GELUApprox(dim, inner_dim, bias=bias)
+
+        self.net = [
+            act,                                       # net.0 (with .proj)
+            nn.Dropout(p=dropout),                     # net.1
+            nn.Linear(inner_dim, dim, bias=bias),      # net.2
+        ]
+
+    def __call__(self, x):
+        x = self.net[0](x)
+        x = self.net[2](x)
+        return x
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +152,8 @@ class Attention(nn.Module):
         self.to_q = nn.Linear(query_dim, inner_dim, bias=bias)
         self.to_k = nn.Linear(query_dim, inner_dim, bias=bias)
         self.to_v = nn.Linear(query_dim, inner_dim, bias=bias)
-        self.to_out = nn.Linear(inner_dim, query_dim, bias=out_bias)
+        # Diffusers uses nn.ModuleList([Linear, Dropout]) -> keys: to_out.0.weight
+        self.to_out = [nn.Linear(inner_dim, query_dim, bias=out_bias)]
 
         self.norm_q = nn.LayerNorm(dim_head, eps=eps) if qk_norm else None
         self.norm_k = nn.LayerNorm(dim_head, eps=eps) if qk_norm else None
@@ -170,7 +212,7 @@ class Attention(nn.Module):
 
         # Reshape back to (B, L, H*D)
         out = out.transpose(0, 2, 1, 3).reshape(B, L, -1)
-        out = self.to_out(out)
+        out = self.to_out[0](out)
 
         # Split back
         enc_out = out[:, :text_seq_length]
@@ -686,7 +728,8 @@ class CogVideoXTransformer3DModel(nn.Module):
         weights = convert_pytorch_weights(weights)
         model.load_weights(list(weights.items()))
 
-        param_count = sum(p.size for _, p in model.parameters().items())
+        leaves = nn.utils.tree_flatten(model.trainable_parameters())
+        param_count = sum(v.size for _, v in leaves)
         print(f"Loaded transformer: {param_count / 1e6:.1f}M parameters")
 
         return model

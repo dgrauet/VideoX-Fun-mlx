@@ -433,7 +433,7 @@ class CogVideoXResnetBlock3D(nn.Module):
                     pad_mode=pad_mode,
                 )
             else:
-                self.nin_shortcut = nn.Conv3d(
+                self.conv_shortcut = nn.Conv3d(
                     in_channels=in_channels,
                     out_channels=out_channels,
                     kernel_size=1,
@@ -501,26 +501,25 @@ class CogVideoXResnetBlock3D(nn.Module):
                     inputs, conv_cache=conv_cache.get("conv_shortcut")
                 )
             else:
-                inputs = self.nin_shortcut(inputs)
+                inputs = self.conv_shortcut(inputs)
 
         hidden_states = hidden_states + inputs
         return hidden_states, new_conv_cache
 
 
 class CogVideoXDownsample3D(nn.Module):
-    """A 3D downsampling layer for CogVideoX using strided convolution.
+    """A 3D downsampling layer using Conv2d per frame + optional temporal avg pool.
 
-    Mirrors diffusers ``CogVideoXDownsample3D``.  When *compress_time* is
-    ``True`` the temporal dimension is also halved (stride 2-2-2); otherwise
-    only the spatial dimensions are halved (stride 1-2-2).
+    Mirrors diffusers ``CogVideoXDownsample3D`` exactly: uses Conv2d for spatial
+    downsampling and avg_pool1d for temporal compression.
 
     Args:
         in_channels: Number of input channels.
         out_channels: Number of output channels.
         kernel_size: Size of the convolving kernel (default 3).
-        stride: Base spatial stride (default 2).
-        padding: Padding applied to all spatial dims (default 0).
-        compress_time: Whether to stride along the temporal axis as well.
+        stride: Spatial stride (default 2).
+        padding: Padding (default 0).
+        compress_time: Whether to also halve the temporal dimension.
     """
 
     def __init__(
@@ -534,22 +533,10 @@ class CogVideoXDownsample3D(nn.Module):
     ) -> None:
         super().__init__()
         self.compress_time = compress_time
-
-        if compress_time:
-            conv_stride = (stride, stride, stride)
-        else:
-            conv_stride = (1, stride, stride)
-
-        self.conv = nn.Conv3d(
-            in_channels,
-            out_channels,
-            kernel_size=kernel_size,
-            stride=conv_stride,
-            padding=padding,
-            bias=True,
+        self.conv = nn.Conv2d(
+            in_channels, out_channels,
+            kernel_size=kernel_size, stride=stride, padding=padding, bias=True,
         )
-        self.padding = padding
-        self.kernel_size = kernel_size
 
     def __call__(self, inputs: mx.array) -> mx.array:
         """Forward pass.
@@ -560,33 +547,46 @@ class CogVideoXDownsample3D(nn.Module):
         Returns:
             Downsampled tensor.
         """
-        # Pad to preserve spatial dims the same way as diffusers:
-        # pad = kernel_size - 1 on all sides, then stride takes effect
-        pad_amt = self.kernel_size - 1 - self.padding
-        t_pad = pad_amt if self.compress_time else (self.kernel_size - 1) // 2
-        s_pad = pad_amt
+        B, D, H, W, C = inputs.shape
 
-        # For temporal dimension, use asymmetric causal-style padding
-        # (pad before, not after) to mirror diffusers behavior
-        # Actually diffusers pads symmetrically for downsample
-        t_pad_before = t_pad // 2
-        t_pad_after = t_pad - t_pad_before
-        s_pad_before = s_pad // 2
-        s_pad_after = s_pad - s_pad_before
+        if self.compress_time:
+            # Temporal compression via avg_pool1d
+            # (B, D, H, W, C) -> (B*H*W, D, C) -> avg_pool -> reshape back
+            x = inputs.transpose(0, 2, 3, 1, 4)  # (B, H, W, D, C)
+            x = x.reshape(B * H * W, D, C)
 
-        if t_pad > 0 or s_pad > 0:
-            inputs = mx.pad(
-                inputs,
-                [
-                    (0, 0),
-                    (t_pad_before, t_pad_after),
-                    (s_pad_before, s_pad_after),
-                    (s_pad_before, s_pad_after),
-                    (0, 0),
-                ],
-            )
+            if D % 2 == 1:
+                # Keep first frame, pool the rest
+                x_first = x[:, :1]
+                x_rest = x[:, 1:]
+                if x_rest.shape[1] > 0:
+                    # Manual avg_pool1d with kernel=2, stride=2
+                    L = x_rest.shape[1]
+                    L_out = L // 2
+                    x_rest = x_rest[:, :L_out * 2].reshape(B * H * W, L_out, 2, C)
+                    x_rest = mx.mean(x_rest, axis=2)
+                x = mx.concatenate([x_first, x_rest], axis=1)
+            else:
+                L_out = D // 2
+                x = x[:, :L_out * 2].reshape(B * H * W, L_out, 2, C)
+                x = mx.mean(x, axis=2)
 
-        return self.conv(inputs)
+            new_D = x.shape[1]
+            x = x.reshape(B, H, W, new_D, C).transpose(0, 3, 1, 2, 4)  # (B, D', H, W, C)
+            inputs = x
+            B, D, H, W, C = inputs.shape
+
+        # Spatial pad: (0, 1, 0, 1) on H and W — matching diffusers F.pad(x, (0,1,0,1))
+        inputs = mx.pad(inputs, [(0, 0), (0, 0), (0, 1), (0, 1), (0, 0)])
+
+        # Apply Conv2d per frame: (B, D, H, W, C) -> (B*D, H, W, C) -> Conv2d -> reshape
+        B, D, H, W, C = inputs.shape
+        inputs = inputs.reshape(B * D, H, W, C)
+        inputs = self.conv(inputs)
+        _, H2, W2, C2 = inputs.shape
+        inputs = inputs.reshape(B, D, H2, W2, C2)
+
+        return inputs
 
 
 class CogVideoXDownBlock3D(nn.Module):
