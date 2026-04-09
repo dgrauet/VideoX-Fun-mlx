@@ -25,7 +25,7 @@ from typing import Dict, List, Optional, Tuple, Union
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_ops.spatial import upsample_nearest
+from mlx_ops.spatial import upsample_nearest, interpolate_3d, avg_pool1d, replicate_pad
 
 
 class CogVideoXCausalConv3d(nn.Module):
@@ -88,22 +88,13 @@ class CogVideoXCausalConv3d(nn.Module):
         new_cache = None
 
         if self.pad_mode == "replicate":
-            # Replicate-pad temporally by repeating the first frame
-            if self.time_pad > 0:
-                first = mx.repeat(inputs[:, :1], self.time_pad, axis=1)
-                inputs = mx.concatenate([first, inputs], axis=1)
-            # Spatial padding
-            if self.height_pad > 0 or self.width_pad > 0:
-                inputs = mx.pad(
-                    inputs,
-                    [
-                        (0, 0),
-                        (0, 0),
-                        (self.height_pad, self.height_pad),
-                        (self.width_pad, self.width_pad),
-                        (0, 0),
-                    ],
-                )
+            inputs = replicate_pad(inputs, [
+                (0, 0),
+                (self.time_pad, 0),
+                (self.height_pad, self.height_pad),
+                (self.width_pad, self.width_pad),
+                (0, 0),
+            ])
         else:
             # Constant pad mode with cache support
             if self.time_kernel_size > 1:
@@ -195,11 +186,11 @@ class CogVideoXSpatialNorm3D(nn.Module):
             zq_first = zq[:, :1]
             zq_rest = zq[:, 1:]
 
-            zq_first = _interpolate_3d(zq_first, f_first_shape)
-            zq_rest = _interpolate_3d(zq_rest, f_rest_shape)
+            zq_first = interpolate_3d(zq_first, f_first_shape)
+            zq_rest = interpolate_3d(zq_rest, f_rest_shape)
             zq = mx.concatenate([zq_first, zq_rest], axis=1)
         else:
-            zq = _interpolate_3d(zq, (f_d, f_h, f_w))
+            zq = interpolate_3d(zq, (f_d, f_h, f_w))
 
         conv_y, new_conv_cache["conv_y"] = self.conv_y(
             zq, conv_cache=conv_cache.get("conv_y")
@@ -211,45 +202,6 @@ class CogVideoXSpatialNorm3D(nn.Module):
         norm_f = self.norm_layer(f)
         new_f = norm_f * conv_y + conv_b
         return new_f, new_conv_cache
-
-
-def _interpolate_3d(x: mx.array, target_shape: Tuple[int, int, int]) -> mx.array:
-    """Nearest-neighbor interpolation for 3D (NDHWC) tensors to target (D, H, W).
-
-    Args:
-        x: Input tensor (B, D, H, W, C).
-        target_shape: Target (D, H, W).
-
-    Returns:
-        Interpolated tensor (B, target_D, target_H, target_W, C).
-    """
-    target_d, target_h, target_w = target_shape
-    B, D, H, W, C = x.shape
-
-    if D == target_d and H == target_h and W == target_w:
-        return x
-
-    # Temporal interpolation (nearest neighbor)
-    if D != target_d:
-        indices = mx.arange(target_d) * D // target_d
-        indices = mx.clip(indices, 0, D - 1)
-        x = x[:, indices]
-
-    # Spatial interpolation: reshape to (B*D, H, W, C), upsample, reshape back
-    if H != target_h or W != target_w:
-        B_new = x.shape[0]
-        D_new = x.shape[1]
-        x = x.reshape(B_new * D_new, x.shape[2], x.shape[3], C)
-        # Nearest-neighbor spatial resize
-        if H != target_h or W != target_w:
-            h_indices = mx.arange(target_h) * H // target_h
-            h_indices = mx.clip(h_indices, 0, H - 1)
-            w_indices = mx.arange(target_w) * W // target_w
-            w_indices = mx.clip(w_indices, 0, W - 1)
-            x = x[:, h_indices][:, :, w_indices]
-        x = x.reshape(B_new, D_new, target_h, target_w, C)
-
-    return x
 
 
 class CogVideoXUpsample3D(nn.Module):
@@ -560,16 +512,10 @@ class CogVideoXDownsample3D(nn.Module):
                 x_first = x[:, :1]
                 x_rest = x[:, 1:]
                 if x_rest.shape[1] > 0:
-                    # Manual avg_pool1d with kernel=2, stride=2
-                    L = x_rest.shape[1]
-                    L_out = L // 2
-                    x_rest = x_rest[:, :L_out * 2].reshape(B * H * W, L_out, 2, C)
-                    x_rest = mx.mean(x_rest, axis=2)
+                    x_rest = avg_pool1d(x_rest, kernel_size=2, stride=2)
                 x = mx.concatenate([x_first, x_rest], axis=1)
             else:
-                L_out = D // 2
-                x = x[:, :L_out * 2].reshape(B * H * W, L_out, 2, C)
-                x = mx.mean(x, axis=2)
+                x = avg_pool1d(x, kernel_size=2, stride=2)
 
             new_D = x.shape[1]
             x = x.reshape(B, H, W, new_D, C).transpose(0, 3, 1, 2, 4)  # (B, D', H, W, C)
