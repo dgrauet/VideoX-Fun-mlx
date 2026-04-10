@@ -50,16 +50,36 @@ class CogVideoXFunInpaintPipeline:
         vae: AutoencoderKLCogVideoX,
         transformer: CogVideoXTransformer3DModel,
         scheduler: DDIMScheduler,
+        text_encoder=None,
+        tokenizer=None,
     ):
         self.vae = vae
         self.transformer = transformer
         self.scheduler = scheduler
+        self.text_encoder = text_encoder
+        self.tokenizer = tokenizer
+
+    def encode_prompt(self, prompt: str, max_length: int = 226) -> mx.array:
+        """Encode a text prompt to embeddings using T5.
+
+        Args:
+            prompt: Text string.
+            max_length: Max token length.
+
+        Returns:
+            (1, max_length, d_model) text embeddings.
+        """
+        if self.tokenizer is None or self.text_encoder is None:
+            raise RuntimeError("text_encoder and tokenizer required for prompt encoding")
+        input_ids = self.tokenizer(prompt, max_length=max_length)
+        return self.text_encoder(input_ids)
 
     def __call__(
         self,
-        prompt_embeds: mx.array,
         video: mx.array,
         mask: mx.array,
+        prompt: Optional[str] = None,
+        prompt_embeds: Optional[mx.array] = None,
         num_inference_steps: int = 50,
         guidance_scale: float = 6.0,
         seed: Optional[int] = None,
@@ -67,9 +87,11 @@ class CogVideoXFunInpaintPipeline:
         """Run video inpainting.
 
         Args:
-            prompt_embeds: (B, text_len, text_dim) pre-computed text embeddings.
             video: (B, D, H, W, C) input video in channels-last.
             mask: (B, D, H, W, 1) binary mask (1 = inpaint region).
+            prompt: Text prompt (requires text_encoder + tokenizer).
+            prompt_embeds: (B, text_len, text_dim) pre-computed text embeddings.
+                Either prompt or prompt_embeds must be provided.
             num_inference_steps: Number of denoising steps.
             guidance_scale: Classifier-free guidance scale (unused for now).
             seed: Random seed.
@@ -77,6 +99,11 @@ class CogVideoXFunInpaintPipeline:
         Returns:
             (B, D, H, W, C) inpainted video.
         """
+        if prompt_embeds is None:
+            if prompt is None:
+                raise ValueError("Either prompt or prompt_embeds must be provided")
+            prompt_embeds = self.encode_prompt(prompt)
+
         if seed is not None:
             mx.random.seed(seed)
 
@@ -151,13 +178,42 @@ class CogVideoXFunInpaintPipeline:
 
     @classmethod
     def from_pretrained(cls, model_path: str, **kwargs):
-        """Load pipeline from a pretrained model directory."""
-        import os
+        """Load pipeline from a pretrained model directory.
 
-        vae = AutoencoderKLCogVideoX.from_pretrained(os.path.join(model_path, "vae"))
-        transformer = CogVideoXTransformer3DModel.from_pretrained(
-            os.path.join(model_path, "transformer")
-        )
+        Loads VAE, transformer, T5 text encoder, and tokenizer.
+        """
+        import os
+        from videox_fun_mlx.models.t5_encoder import T5Encoder
+        from videox_fun_mlx.models.tokenizer import T5Tokenizer
+
+        vae_path = os.path.join(model_path, "vae")
+        tf_path = os.path.join(model_path, "transformer")
+
+        # VAE and transformer can be in subdirs or flat (mlx-forge output)
+        if os.path.isdir(vae_path):
+            vae = AutoencoderKLCogVideoX.from_pretrained(vae_path)
+        else:
+            vae = AutoencoderKLCogVideoX.from_pretrained(model_path, subfolder="vae")
+
+        if os.path.isdir(tf_path):
+            transformer = CogVideoXTransformer3DModel.from_pretrained(tf_path)
+        else:
+            transformer = CogVideoXTransformer3DModel.from_pretrained(model_path, subfolder="transformer")
+
+        # T5 encoder (optional — might not be present)
+        text_encoder = None
+        tokenizer = None
+        t5_weights = os.path.join(model_path, "text_encoder.safetensors")
+        spiece_file = os.path.join(model_path, "tokenizer_spiece.model")
+        if os.path.exists(t5_weights):
+            print("Loading T5 text encoder...")
+            text_encoder = T5Encoder.from_pretrained(model_path)
+        if os.path.exists(spiece_file):
+            tokenizer = T5Tokenizer(model_path)
+
         scheduler = DDIMScheduler(**kwargs)
 
-        return cls(vae=vae, transformer=transformer, scheduler=scheduler)
+        return cls(
+            vae=vae, transformer=transformer, scheduler=scheduler,
+            text_encoder=text_encoder, tokenizer=tokenizer,
+        )
