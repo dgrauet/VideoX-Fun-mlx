@@ -694,15 +694,26 @@ class CogVideoXTransformer3DModel(nn.Module):
         subfolder: str = None,
         transformer_additional_kwargs: dict = None,
     ):
-        """Load pretrained transformer from directory."""
-        from videox_fun_mlx.utils import load_config, load_weights, convert_pytorch_weights
+        """Load from mlx-forge converted dir or PyTorch HuggingFace dir."""
+        from videox_fun_mlx.utils import load_config, load_mlx_weights
 
         transformer_additional_kwargs = transformer_additional_kwargs or {}
 
         if subfolder:
-            pretrained_model_path = os.path.join(pretrained_model_path, subfolder)
+            config_path = os.path.join(pretrained_model_path, subfolder)
+        else:
+            config_path = pretrained_model_path
 
-        config = load_config(pretrained_model_path)
+        # Priority: transformer_config.json > config.json["transformer"] > config.json
+        tf_config_file = os.path.join(pretrained_model_path, "transformer_config.json")
+        if os.path.exists(tf_config_file):
+            with open(tf_config_file) as f:
+                config = json.load(f)
+        else:
+            config = load_config(config_path)
+            # If nested config (mlx-forge root config.json), extract transformer section
+            if "transformer" in config and "num_layers" not in config:
+                config = config["transformer"]
 
         init_keys = {
             "num_attention_heads", "attention_head_dim", "in_channels", "out_channels",
@@ -719,9 +730,7 @@ class CogVideoXTransformer3DModel(nn.Module):
         filtered_config.update(transformer_additional_kwargs)
 
         model = cls(**filtered_config)
-
-        weights = load_weights(pretrained_model_path)
-        weights = convert_pytorch_weights(weights)
+        weights = load_mlx_weights(pretrained_model_path, "transformer")
         model.load_weights(list(weights.items()))
 
         leaves = nn.utils.tree_flatten(model.trainable_parameters())

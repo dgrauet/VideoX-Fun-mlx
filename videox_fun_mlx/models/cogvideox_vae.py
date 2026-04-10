@@ -1177,13 +1177,27 @@ class AutoencoderKLCogVideoX(nn.Module):
 
     @classmethod
     def from_pretrained(cls, pretrained_model_path: str, subfolder: str = None):
+        """Load from mlx-forge converted dir or PyTorch HuggingFace dir."""
         import os
-        from videox_fun_mlx.utils import load_config, load_weights, convert_pytorch_weights
+        from videox_fun_mlx.utils import load_config, load_mlx_weights
 
+        # If subfolder specified, it's HuggingFace style (path/vae/)
         if subfolder:
-            pretrained_model_path = os.path.join(pretrained_model_path, subfolder)
+            config_path = os.path.join(pretrained_model_path, subfolder)
+        else:
+            config_path = pretrained_model_path
 
-        config = load_config(pretrained_model_path)
+        # Priority: vae_config.json > config.json["vae"] > config.json
+        import json as _json
+        vae_config_file = os.path.join(pretrained_model_path, "vae_config.json")
+        if os.path.exists(vae_config_file):
+            with open(vae_config_file) as f:
+                config = _json.load(f)
+        else:
+            config = load_config(config_path)
+            if "vae" in config and "latent_channels" not in config:
+                config = config["vae"]
+
         init_keys = {
             "in_channels", "out_channels", "down_block_types", "up_block_types",
             "block_out_channels", "latent_channels", "layers_per_block", "act_fn",
@@ -1196,7 +1210,6 @@ class AutoencoderKLCogVideoX(nn.Module):
                 filtered_config[k] = tuple(filtered_config[k])
 
         model = cls(**filtered_config)
-        weights = load_weights(pretrained_model_path)
-        weights = convert_pytorch_weights(weights)
+        weights = load_mlx_weights(pretrained_model_path, "vae")
         model.load_weights(list(weights.items()))
         return model

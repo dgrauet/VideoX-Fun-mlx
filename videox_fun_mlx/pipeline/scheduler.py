@@ -1,21 +1,26 @@
-"""DDIM Scheduler for CogVideoX-Fun MLX port.
+"""CogVideoX DDIM Scheduler for MLX.
 
-Minimal implementation of Denoising Diffusion Implicit Models (DDIM) scheduler,
-compatible with CogVideoXDDIMScheduler from diffusers.
+Supports v-prediction, trailing timestep spacing, and zero-SNR rescaling
+as used by CogVideoXDDIMScheduler in diffusers.
 """
 
+import math
 import mlx.core as mx
 
 
 class DDIMScheduler:
-    """DDIM scheduler for diffusion model inference.
+    """DDIM scheduler compatible with CogVideoXDDIMScheduler.
 
     Args:
         num_train_timesteps: Number of diffusion steps used during training.
         beta_start: Starting value of beta schedule.
         beta_end: Ending value of beta schedule.
-        beta_schedule: Type of beta schedule. Only "scaled_linear" is supported.
-        num_inference_steps: Default number of denoising steps for inference.
+        beta_schedule: Type of beta schedule ("scaled_linear" or "linear").
+        prediction_type: "epsilon" or "v_prediction".
+        rescale_betas_zero_snr: Whether to rescale betas for zero terminal SNR.
+        timestep_spacing: "leading" or "trailing".
+        set_alpha_to_one: Whether to set final alpha to 1.
+        num_inference_steps: Default number of denoising steps.
     """
 
     def __init__(
@@ -24,9 +29,18 @@ class DDIMScheduler:
         beta_start: float = 0.00085,
         beta_end: float = 0.012,
         beta_schedule: str = "scaled_linear",
+        prediction_type: str = "v_prediction",
+        rescale_betas_zero_snr: bool = True,
+        timestep_spacing: str = "trailing",
+        set_alpha_to_one: bool = True,
+        clip_sample: bool = False,
         num_inference_steps: int = 50,
+        **kwargs,
     ):
         self.num_train_timesteps = num_train_timesteps
+        self.prediction_type = prediction_type
+        self.timestep_spacing = timestep_spacing
+        self.clip_sample = clip_sample
 
         if beta_schedule == "scaled_linear":
             betas = mx.linspace(beta_start**0.5, beta_end**0.5, num_train_timesteps) ** 2
@@ -35,63 +49,100 @@ class DDIMScheduler:
         else:
             raise ValueError(f"Unsupported beta_schedule: {beta_schedule}")
 
+        if rescale_betas_zero_snr:
+            betas = self._rescale_zero_terminal_snr(betas)
+
         alphas = 1.0 - betas
         self.alphas_cumprod = mx.cumprod(alphas)
+
+        # Final alpha (for prev_t at t=0)
+        self.final_alpha_cumprod = mx.array(1.0) if set_alpha_to_one else self.alphas_cumprod[0]
 
         self._timesteps = None
         self.set_timesteps(num_inference_steps)
 
-    def set_timesteps(self, num_inference_steps: int) -> None:
-        """Compute the timestep schedule for inference.
+    @staticmethod
+    def _rescale_zero_terminal_snr(betas: mx.array) -> mx.array:
+        """Rescale betas so that the terminal SNR is zero (last alpha_cumprod = 0)."""
+        alphas = 1.0 - betas
+        alphas_cumprod = mx.cumprod(alphas)
+        # sqrt(alpha_bar)
+        alphas_bar_sqrt = mx.sqrt(alphas_cumprod)
+        # Last element must be 0
+        alphas_bar_sqrt_0 = alphas_bar_sqrt[0]
+        alphas_bar_sqrt_T = alphas_bar_sqrt[-1]
+        alphas_bar_sqrt = (alphas_bar_sqrt - alphas_bar_sqrt_T) * alphas_bar_sqrt_0 / (alphas_bar_sqrt_0 - alphas_bar_sqrt_T)
+        alphas_cumprod = alphas_bar_sqrt ** 2
+        # Reconstruct betas
+        alphas = alphas_cumprod[1:] / alphas_cumprod[:-1]
+        alphas = mx.concatenate([alphas_cumprod[:1], alphas])
+        betas = 1 - alphas
+        return betas
 
-        Produces evenly spaced timesteps from num_train_timesteps-1 down to 0.
-        """
+    def set_timesteps(self, num_inference_steps: int) -> None:
+        """Compute the timestep schedule."""
         self.num_inference_steps = num_inference_steps
-        step_ratio = self.num_train_timesteps // num_inference_steps
-        # Timesteps in descending order: [999, 979, 959, ..., 19] for default settings
-        timesteps = (
-            mx.arange(0, num_inference_steps) * step_ratio
-        )
-        self._timesteps = timesteps[::-1]
+
+        if self.timestep_spacing == "trailing":
+            step_ratio = self.num_train_timesteps / num_inference_steps
+            timesteps = mx.round(mx.arange(num_inference_steps, 0, -1) * step_ratio).astype(mx.int32) - 1
+            timesteps = mx.clip(timesteps, 0, self.num_train_timesteps - 1)
+        else:  # "leading"
+            step_ratio = self.num_train_timesteps // num_inference_steps
+            timesteps = mx.arange(0, num_inference_steps) * step_ratio
+            timesteps = timesteps[::-1]
+
+        self._timesteps = timesteps
 
     @property
     def timesteps(self) -> mx.array:
-        """Return the current timestep schedule."""
         return self._timesteps
+
+    def _get_prev_timestep(self, timestep: int) -> int:
+        if self.timestep_spacing == "trailing":
+            step_ratio = self.num_train_timesteps / self.num_inference_steps
+            return int(timestep - step_ratio)
+        else:
+            step_ratio = self.num_train_timesteps // self.num_inference_steps
+            return timestep - step_ratio
 
     def step(
         self,
         model_output: mx.array,
-        timestep: mx.array,
+        timestep,
         sample: mx.array,
     ) -> mx.array:
         """Perform one DDIM denoising step.
 
-        Args:
-            model_output: Predicted noise from the model (epsilon prediction).
-            timestep: Current timestep (scalar).
-            sample: Current noisy sample.
-
-        Returns:
-            Denoised sample after one DDIM step.
+        Supports both epsilon-prediction and v-prediction.
         """
-        # Current timestep index
         t = int(timestep.item()) if isinstance(timestep, mx.array) else int(timestep)
-        step_ratio = self.num_train_timesteps // self.num_inference_steps
-        prev_t = t - step_ratio
+        prev_t = self._get_prev_timestep(t)
 
         alpha_prod_t = self.alphas_cumprod[t]
-        alpha_prod_t_prev = self.alphas_cumprod[prev_t] if prev_t >= 0 else mx.array(1.0)
+        alpha_prod_t_prev = self.alphas_cumprod[prev_t] if prev_t >= 0 else self.final_alpha_cumprod
 
-        # Predict x_0
-        sqrt_alpha_prod_t = mx.sqrt(alpha_prod_t)
-        sqrt_one_minus_alpha_prod_t = mx.sqrt(1.0 - alpha_prod_t)
-        pred_x0 = (sample - sqrt_one_minus_alpha_prod_t * model_output) / sqrt_alpha_prod_t
+        sqrt_alpha_t = mx.sqrt(alpha_prod_t)
+        sqrt_one_minus_alpha_t = mx.sqrt(1.0 - alpha_prod_t)
+        sqrt_alpha_t_prev = mx.sqrt(alpha_prod_t_prev)
+        sqrt_one_minus_alpha_t_prev = mx.sqrt(1.0 - alpha_prod_t_prev)
 
-        # Compute predicted sample (deterministic DDIM, eta=0)
-        sqrt_alpha_prod_t_prev = mx.sqrt(alpha_prod_t_prev)
-        sqrt_one_minus_alpha_prod_t_prev = mx.sqrt(1.0 - alpha_prod_t_prev)
-        pred_sample = sqrt_alpha_prod_t_prev * pred_x0 + sqrt_one_minus_alpha_prod_t_prev * model_output
+        if self.prediction_type == "v_prediction":
+            # v = sqrt(alpha_t) * eps - sqrt(1-alpha_t) * x0
+            # => x0 = sqrt(alpha_t) * sample - sqrt(1-alpha_t) * v
+            # => eps = sqrt(alpha_t) * v + sqrt(1-alpha_t) * sample  (not used directly)
+            pred_x0 = sqrt_alpha_t * sample - sqrt_one_minus_alpha_t * model_output
+            pred_eps = sqrt_alpha_t * model_output + sqrt_one_minus_alpha_t * sample  # for direction
+        else:
+            # epsilon prediction
+            pred_x0 = (sample - sqrt_one_minus_alpha_t * model_output) / sqrt_alpha_t
+            pred_eps = model_output
+
+        if self.clip_sample:
+            pred_x0 = mx.clip(pred_x0, -1, 1)
+
+        # DDIM step (eta=0, deterministic)
+        pred_sample = sqrt_alpha_t_prev * pred_x0 + sqrt_one_minus_alpha_t_prev * pred_eps
 
         return pred_sample
 
@@ -99,18 +150,9 @@ class DDIMScheduler:
         self,
         original: mx.array,
         noise: mx.array,
-        timestep: mx.array,
+        timestep,
     ) -> mx.array:
-        """Add noise to original samples at the given timestep level.
-
-        Args:
-            original: Clean samples.
-            noise: Noise to add (same shape as original).
-            timestep: Timestep controlling the noise level (scalar).
-
-        Returns:
-            Noisy samples.
-        """
+        """Add noise to original samples at the given timestep level."""
         t = int(timestep.item()) if isinstance(timestep, mx.array) else int(timestep)
         alpha_prod_t = self.alphas_cumprod[t]
 

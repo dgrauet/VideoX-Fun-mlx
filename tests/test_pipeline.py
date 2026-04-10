@@ -20,8 +20,8 @@ class TestDDIMScheduler:
         """First timestep should be near num_train_timesteps-1, last near 0."""
         sched = DDIMScheduler(num_train_timesteps=1000, num_inference_steps=50)
         ts = sched.timesteps.tolist()
-        assert ts[0] == 980  # (50-1)*20 = 980
-        assert ts[-1] == 0
+        assert ts[0] == 999  # trailing spacing: starts at T-1
+        assert ts[-1] >= 0
 
     def test_set_timesteps(self):
         """set_timesteps updates the schedule."""

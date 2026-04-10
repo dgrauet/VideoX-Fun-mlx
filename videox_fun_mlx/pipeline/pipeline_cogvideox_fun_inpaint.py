@@ -211,7 +211,19 @@ class CogVideoXFunInpaintPipeline:
         if os.path.exists(spiece_file):
             tokenizer = T5Tokenizer(model_path)
 
-        scheduler = DDIMScheduler(**kwargs)
+        # Load scheduler config if available
+        scheduler_config = {}
+        sched_config_file = os.path.join(model_path, "scheduler_scheduler_config.json")
+        if os.path.exists(sched_config_file):
+            import json
+            with open(sched_config_file) as f:
+                scheduler_config = json.load(f)
+            # Remove diffusers-internal keys
+            scheduler_config.pop("_class_name", None)
+            scheduler_config.pop("_diffusers_version", None)
+            scheduler_config.pop("trained_betas", None)
+        scheduler_config.update(kwargs)
+        scheduler = DDIMScheduler(**scheduler_config)
 
         return cls(
             vae=vae, transformer=transformer, scheduler=scheduler,

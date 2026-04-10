@@ -84,3 +84,37 @@ def convert_pytorch_weights(weights: dict) -> dict:
         else:
             converted[key] = w
     return converted
+
+
+def load_mlx_weights(path: str, component: str) -> dict:
+    """Load weights from an mlx-forge converted model directory.
+
+    Handles:
+    - Single-file format: {component}.safetensors (with "{component}." prefix in keys)
+    - Subdirectory format: {component}/diffusion_pytorch_model.safetensors (no prefix)
+
+    Returns weights with the component prefix stripped.
+    """
+    from pathlib import Path
+    p = Path(path)
+
+    # Try mlx-forge flat format first: transformer.safetensors, vae.safetensors
+    flat_file = p / f"{component}.safetensors"
+    if flat_file.exists():
+        weights = mx.load(str(flat_file))
+        # Strip component prefix
+        prefix = f"{component}."
+        return {k.removeprefix(prefix): v for k, v in weights.items()}
+
+    # Try subdirectory format (PyTorch/HuggingFace)
+    sub_dir = p / component
+    if sub_dir.is_dir():
+        shard_files = sorted(sub_dir.glob("*.safetensors"))
+        if shard_files:
+            weights = {}
+            for f in shard_files:
+                weights.update(mx.load(str(f)))
+            # These are PyTorch weights — need transposition
+            return convert_pytorch_weights(weights)
+
+    raise FileNotFoundError(f"No weights for '{component}' found in {path}")

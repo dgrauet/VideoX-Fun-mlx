@@ -250,8 +250,16 @@ class T5Encoder(nn.Module):
 
     @classmethod
     def from_pretrained(cls, model_path: str):
-        """Load T5 encoder from a directory with config + safetensors."""
+        """Load T5 encoder from a directory with config + safetensors.
+
+        Supports two layouts:
+        - mlx-forge flat: text_encoder_config.json + text_encoder.safetensors
+        - HuggingFace nested: text_encoder/config.json + text_encoder/*.safetensors
+        """
+        # Find config
         config_file = os.path.join(model_path, "text_encoder_config.json")
+        if not os.path.exists(config_file):
+            config_file = os.path.join(model_path, "text_encoder", "config.json")
         if not os.path.exists(config_file):
             config_file = os.path.join(model_path, "config.json")
         with open(config_file) as f:
@@ -259,10 +267,24 @@ class T5Encoder(nn.Module):
 
         model = cls(config)
 
-        # Load weights
+        # Find weights — flat or nested, single or sharded
         weights_file = os.path.join(model_path, "text_encoder.safetensors")
         if not os.path.exists(weights_file):
-            raise FileNotFoundError(f"No text_encoder.safetensors in {model_path}")
+            # Try nested directory with sharded weights
+            from pathlib import Path
+            te_dir = Path(model_path) / "text_encoder"
+            if te_dir.is_dir():
+                shard_files = sorted(te_dir.glob("*.safetensors"))
+                if shard_files:
+                    weights = {}
+                    for sf in shard_files:
+                        weights.update(mx.load(str(sf)))
+                    cleaned = {}
+                    for k, v in weights.items():
+                        cleaned[k.removeprefix("text_encoder.")] = v
+                    model.load_weights(list(cleaned.items()))
+                    return model
+            raise FileNotFoundError(f"No T5 weights found in {model_path}")
 
         weights = mx.load(weights_file)
 

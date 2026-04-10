@@ -16,9 +16,19 @@ class T5Tokenizer:
 
     def __init__(self, model_path: str, max_length: int = 226):
         import sentencepiece as spm
-        spiece_file = os.path.join(model_path, "tokenizer_spiece.model")
-        if not os.path.exists(spiece_file):
-            raise FileNotFoundError(f"No tokenizer_spiece.model in {model_path}")
+        # Try multiple locations
+        candidates = [
+            os.path.join(model_path, "tokenizer_spiece.model"),
+            os.path.join(model_path, "tokenizer", "spiece.model"),
+            os.path.join(model_path, "spiece.model"),
+        ]
+        spiece_file = None
+        for c in candidates:
+            if os.path.exists(c):
+                spiece_file = c
+                break
+        if spiece_file is None:
+            raise FileNotFoundError(f"No spiece.model found in {model_path}")
         self.sp = spm.SentencePieceProcessor()
         self.sp.Load(spiece_file)
         self.max_length = max_length
