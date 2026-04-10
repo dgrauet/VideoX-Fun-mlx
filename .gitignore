@@ -175,3 +175,6 @@ __pycache__/
 *.pyc
 output*.gif
 vae_roundtrip.png
+*__pycache__*
+*.pyc
+.pytest_cache/
