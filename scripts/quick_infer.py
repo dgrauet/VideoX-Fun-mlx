@@ -22,9 +22,10 @@ def main():
     parser.add_argument("--prompt", type=str, default="a beautiful sunset over the ocean")
     parser.add_argument("--model-path", type=str,
                         default="/Users/dgrauet/Work/mlx-forge/models/cogvideox-fun-v1.5-5b-inp-mlx")
-    parser.add_argument("--steps", type=int, default=5)
-    parser.add_argument("--height", type=int, default=64)
-    parser.add_argument("--width", type=int, default=64)
+    parser.add_argument("--steps", type=int, default=50)
+    parser.add_argument("--guidance-scale", type=float, default=6.0)
+    parser.add_argument("--height", type=int, default=384)
+    parser.add_argument("--width", type=int, default=672)
     parser.add_argument("--frames", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", type=str, default="output.gif")
@@ -63,7 +64,7 @@ def main():
     )
 
     H, W, F = args.height, args.width, args.frames
-    print(f"\nGenerating {F} frames at {H}x{W}, {args.steps} steps")
+    print(f"\nGenerating {F} frames at {H}x{W}, {args.steps} steps, guidance={args.guidance_scale}")
     print(f'Prompt: "{args.prompt}"')
 
     video = mx.zeros((1, F, H, W, 3))
@@ -75,17 +76,16 @@ def main():
         mask=mask,
         prompt=args.prompt,
         num_inference_steps=args.steps,
+        guidance_scale=args.guidance_scale,
         seed=args.seed,
     )
     mx.eval(output)
     gen_time = time.monotonic() - t0
     print(f"Generation: {gen_time:.1f}s ({gen_time/args.steps:.1f}s/step)")
 
+    # Pipeline output is already in [0, 1]
     output_np = np.array(output[0].astype(mx.float32))
     print(f"Shape: {output_np.shape}, range: [{output_np.min():.3f}, {output_np.max():.3f}]")
-
-    # Normalize to [0, 255]
-    output_np = (output_np - output_np.min()) / (output_np.max() - output_np.min() + 1e-8)
     output_np = (output_np * 255).clip(0, 255).astype(np.uint8)
 
     from PIL import Image
