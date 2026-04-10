@@ -109,30 +109,35 @@ class CogVideoXFunInpaintPipeline:
 
         B = video.shape[0]
 
-        # 1. Encode video to latents (VAE accepts NDHWC)
+        # 1. Encode video to latent space
         posterior = self.vae.encode(video)
-        latents = posterior.sample()
-        latents = latents * self.vae.scaling_factor
+        latents = posterior.mode() * self.vae.scaling_factor
 
-        # 2. Prepare masked video latents
-        masked_video = video * (1 - mask)
-        masked_posterior = self.vae.encode(masked_video)
-        masked_video_latents = masked_posterior.mode() * self.vae.scaling_factor
+        # Determine latent shape for noise generation
+        latent_cf = latents.transpose(0, 1, 4, 2, 3)  # NDHWC -> NFCHW
+        B_lat, F_lat, C_lat, H_lat, W_lat = latent_cf.shape
 
-        # 3. Resize mask to latent space
-        mask_latents = _resize_mask_to_latent(mask, latents.shape)
+        # 2. Prepare inpaint conditioning
+        is_full_mask = mx.mean(mask).item() > 0.99
+        if is_full_mask:
+            # Full mask = generate from scratch: use zeros for conditioning
+            mask_latent_1ch = mx.zeros((B_lat, F_lat, 1, H_lat, W_lat))
+            masked_video_latents_cf = mx.zeros((B_lat, F_lat, C_lat, H_lat, W_lat))
+        else:
+            # Partial mask: encode masked video, resize mask
+            masked_video = video * (1 - mask)
+            masked_posterior = self.vae.encode(masked_video)
+            masked_video_latents = masked_posterior.mode() * self.vae.scaling_factor
+            masked_video_latents_cf = masked_video_latents.transpose(0, 1, 4, 2, 3)
+            mask_latent = _resize_mask_to_latent(mask, latents.shape)
+            mask_latent_1ch = mask_latent.transpose(0, 1, 4, 2, 3)
 
-        # 4. Concatenate mask + masked_video_latents for inpainting conditioning
-        inpaint_latents = mx.concatenate([mask_latents, masked_video_latents], axis=-1)
+        inpaint_cf = mx.concatenate([mask_latent_1ch, masked_video_latents_cf], axis=2)
 
-        # Convert to channels-first for transformer: (B, D, H, W, C) -> (B, F, C, H, W)
-        latent_cf = latents.transpose(0, 1, 4, 2, 3)
-        inpaint_cf = inpaint_latents.transpose(0, 1, 4, 2, 3)
-
-        # 5. Setup scheduler
+        # 3. Setup scheduler
         self.scheduler.set_timesteps(num_inference_steps)
 
-        # 6. Add noise to latents
+        # 4. Start from noise
         noise = mx.random.normal(latent_cf.shape)
         noisy_latents = self.scheduler.add_noise(latent_cf, noise, self.scheduler.timesteps[0])
 
