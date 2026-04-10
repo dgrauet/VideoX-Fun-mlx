@@ -118,3 +118,76 @@ def load_mlx_weights(path: str, component: str) -> dict:
             return convert_pytorch_weights(weights)
 
     raise FileNotFoundError(f"No weights for '{component}' found in {path}")
+
+
+def get_quantize_config(path: str) -> Optional[dict]:
+    """Read quantize_config.json if present. Returns None if not quantized."""
+    config_file = os.path.join(path, "quantize_config.json")
+    if not os.path.exists(config_file):
+        return None
+    with open(config_file) as f:
+        return json.load(f)
+
+
+def quantize_model_from_weights(model, weights: dict, path: str, component: str):
+    """Replace Linear layers with QuantizedLinear where weights have .scales keys.
+
+    Must be called BEFORE load_weights so that QuantizedLinear layers
+    are in place to receive the quantized weight format.
+    """
+    import mlx.nn as nn
+
+    qconfig = get_quantize_config(path)
+    if qconfig is None:
+        return
+
+    q = qconfig.get("quantization", {})
+    skip = q.get("skip_components", [])
+    if component in skip:
+        return
+
+    bits = q.get("bits", 4)
+    group_size = q.get("group_size", 64)
+
+    # Find which layers are quantized by looking for .scales keys
+    quantized_paths = set()
+    for key in weights:
+        if key.endswith(".scales"):
+            quantized_paths.add(key.removesuffix(".scales"))
+
+    # Replace Linear with QuantizedLinear for each quantized path
+    def _set_nested(obj, path_parts, value):
+        for part in path_parts[:-1]:
+            if part.isdigit():
+                obj = obj[int(part)]
+            else:
+                obj = getattr(obj, part)
+        last = path_parts[-1]
+        if last.isdigit():
+            obj[int(last)] = value
+        else:
+            setattr(obj, last, value)
+
+    def _get_nested(obj, path_parts):
+        for part in path_parts:
+            if part.isdigit():
+                obj = obj[int(part)]
+            else:
+                obj = getattr(obj, part)
+        return obj
+
+    for qpath in quantized_paths:
+        parts = qpath.split(".")
+        try:
+            linear = _get_nested(model, parts)
+        except (AttributeError, IndexError, TypeError):
+            continue
+        if not isinstance(linear, nn.Linear):
+            continue
+
+        in_dim = linear.weight.shape[1]
+        out_dim = linear.weight.shape[0]
+        has_bias = hasattr(linear, 'bias') and linear.bias is not None
+        ql = nn.QuantizedLinear(in_dim, out_dim, bias=has_bias,
+                                group_size=group_size, bits=bits)
+        _set_nested(model, parts, ql)

@@ -267,10 +267,11 @@ class T5Encoder(nn.Module):
 
         model = cls(config)
 
+        # Will quantize after loading weights dict but before load_weights
+
         # Find weights — flat or nested, single or sharded
         weights_file = os.path.join(model_path, "text_encoder.safetensors")
         if not os.path.exists(weights_file):
-            # Try nested directory with sharded weights
             from pathlib import Path
             te_dir = Path(model_path) / "text_encoder"
             if te_dir.is_dir():
@@ -279,21 +280,17 @@ class T5Encoder(nn.Module):
                     weights = {}
                     for sf in shard_files:
                         weights.update(mx.load(str(sf)))
-                    cleaned = {}
-                    for k, v in weights.items():
-                        cleaned[k.removeprefix("text_encoder.")] = v
+                    cleaned = {k.removeprefix("text_encoder."): v for k, v in weights.items()}
+                    from videox_fun_mlx.utils import quantize_model_from_weights
+                    quantize_model_from_weights(model, cleaned, model_path, "text_encoder")
                     model.load_weights(list(cleaned.items()))
                     return model
             raise FileNotFoundError(f"No T5 weights found in {model_path}")
 
         weights = mx.load(weights_file)
-
-        # Strip "text_encoder." prefix if present
-        cleaned = {}
-        for k, v in weights.items():
-            new_k = k.removeprefix("text_encoder.")
-            cleaned[new_k] = v
-
+        cleaned = {k.removeprefix("text_encoder."): v for k, v in weights.items()}
+        from videox_fun_mlx.utils import quantize_model_from_weights
+        quantize_model_from_weights(model, cleaned, model_path, "text_encoder")
         model.load_weights(list(cleaned.items()))
         return model
 

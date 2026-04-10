@@ -733,6 +733,8 @@ class CogVideoXTransformer3DModel(nn.Module):
 
         model = cls(**filtered_config)
         weights = load_mlx_weights(pretrained_model_path, "transformer")
+        from videox_fun_mlx.utils import quantize_model_from_weights
+        quantize_model_from_weights(model, weights, pretrained_model_path, "transformer")
         model.load_weights(list(weights.items()))
 
         leaves = nn.utils.tree_flatten(model.trainable_parameters())
