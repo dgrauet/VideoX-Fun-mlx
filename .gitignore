@@ -170,3 +170,8 @@ cython_debug/
 #.idea/
 __pycache__/
 .pytest_cache/
+__pycache__/
+.pytest_cache/
+*.pyc
+output*.gif
+vae_roundtrip.png
