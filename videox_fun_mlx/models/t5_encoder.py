@@ -97,13 +97,14 @@ class T5Attention(nn.Module):
         )
         values = self.relative_attention_bias(relative_position_bucket)
         # (query_length, key_length, num_heads) -> (1, num_heads, query_length, key_length)
-        values = values.transpose(0, 2, 1).reshape(1, self.num_heads, query_length, key_length)  # fix: need proper reshape
+        values = values.transpose(2, 0, 1).reshape(1, self.num_heads, query_length, key_length)
         return values
 
     def __call__(
         self,
         x: mx.array,
         position_bias: Optional[mx.array] = None,
+        attention_mask: Optional[mx.array] = None,
     ) -> tuple:
         B, L, _ = x.shape
 
@@ -119,6 +120,9 @@ class T5Attention(nn.Module):
 
         if position_bias is not None:
             scores = scores + position_bias
+
+        if attention_mask is not None:
+            scores = scores + attention_mask
 
         weights = mx.softmax(scores, axis=-1)
         out = weights @ v
@@ -169,8 +173,8 @@ class T5Block(nn.Module):
             T5FFSublayer(d_model, d_ff, eps),
         ]
 
-    def __call__(self, x: mx.array, position_bias=None):
-        x, position_bias = self.layer[0](x, position_bias)
+    def __call__(self, x: mx.array, position_bias=None, attention_mask=None):
+        x, position_bias = self.layer[0](x, position_bias, attention_mask)
         x = self.layer[1](x)
         return x, position_bias
 
@@ -185,9 +189,9 @@ class T5AttentionSublayer(nn.Module):
             d_model, d_kv, num_heads, has_rpb, num_buckets, max_dist,
         )
 
-    def __call__(self, x, position_bias=None):
+    def __call__(self, x, position_bias=None, attention_mask=None):
         normed = self.layer_norm(x)
-        attn_out, position_bias = self.SelfAttention(normed, position_bias)
+        attn_out, position_bias = self.SelfAttention(normed, position_bias, attention_mask)
         return x + attn_out, position_bias
 
 
@@ -234,7 +238,15 @@ class T5Encoder(nn.Module):
             (B, L, d_model) hidden states.
         """
         x = self.shared(input_ids)
-        return self.encoder(x)
+        # Compute in float32 for numerical stability (weights are bf16)
+        x = x.astype(mx.float32)
+
+        # Create attention mask: 0 for real tokens, -inf for padding (id=0)
+        # Shape: (B, 1, 1, L) for broadcasting with (B, H, L, L) scores
+        pad_mask = (input_ids == 0).astype(mx.float32)  # 1 where padding
+        attention_mask = pad_mask[:, None, None, :] * -1e9  # (B, 1, 1, L)
+
+        return self.encoder(x, attention_mask=attention_mask)
 
     @classmethod
     def from_pretrained(cls, model_path: str):
@@ -279,8 +291,8 @@ class T5EncoderStack(nn.Module):
             ))
         self.final_layer_norm = T5RMSNorm(d_model, eps)
 
-    def __call__(self, x: mx.array) -> mx.array:
+    def __call__(self, x: mx.array, attention_mask: Optional[mx.array] = None) -> mx.array:
         position_bias = None
         for block in self.block:
-            x, position_bias = block(x, position_bias)
+            x, position_bias = block(x, position_bias, attention_mask)
         return self.final_layer_norm(x)
