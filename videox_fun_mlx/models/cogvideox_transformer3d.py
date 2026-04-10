@@ -58,9 +58,11 @@ class AdaLayerNorm(nn.Module):
 
     def __call__(self, x, temb=None):
         emb = self.linear(self.silu(temb))
-        if emb.ndim == 2:
-            emb = mx.expand_dims(emb, 1)
-        scale, shift = mx.split(emb, 2, axis=-1)
+        # CogVideoX uses chunk_dim=1: shift first, then scale
+        shift, scale = mx.split(emb, 2, axis=-1)
+        if shift.ndim == 2:
+            shift = mx.expand_dims(shift, 1)
+            scale = mx.expand_dims(scale, 1)
         return self.norm(x) * (1 + scale) + shift
 
 
