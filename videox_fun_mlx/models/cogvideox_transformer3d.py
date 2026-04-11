@@ -735,7 +735,22 @@ class CogVideoXTransformer3DModel(nn.Module):
         weights = load_mlx_weights(pretrained_model_path, "transformer")
         from videox_fun_mlx.utils import quantize_model_from_weights
         quantize_model_from_weights(model, weights, pretrained_model_path, "transformer")
-        model.load_weights(list(weights.items()))
+        if "in_channels" in transformer_additional_kwargs:
+            # When in_channels is overridden (e.g. VOID uses 48 vs base 33),
+            # skip patch_embed.proj weights that have the wrong shape
+            model_in_ch = transformer_additional_kwargs["in_channels"]
+            p = filtered_config.get("patch_size", 2)
+            p_t = filtered_config.get("patch_size_t", 2)
+            expected_dim = model_in_ch * p * p * (p_t or 1)
+            filtered_weights = {
+                k: v for k, v in weights.items()
+                if not (k == "patch_embed.proj.weight" and v.shape[-1] != expected_dim)
+                and not (k == "patch_embed.proj.bias" and "patch_embed.proj.weight" in weights
+                         and weights["patch_embed.proj.weight"].shape[-1] != expected_dim)
+            }
+            model.load_weights(list(filtered_weights.items()), strict=False)
+        else:
+            model.load_weights(list(weights.items()))
 
         leaves = nn.utils.tree_flatten(model.trainable_parameters())
         param_count = sum(v.size for _, v in leaves)
