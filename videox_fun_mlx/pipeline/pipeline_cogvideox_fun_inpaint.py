@@ -154,8 +154,9 @@ class CogVideoXFunInpaintPipeline:
         if seed is not None:
             mx.random.seed(seed)
 
-        # 2. Encode video to latent space
-        posterior = self.vae.encode(video)
+        # 2. Normalize video to [-1, 1] for VAE and encode
+        video_norm = video * 2 - 1  # [0,1] -> [-1,1]
+        posterior = self.vae.encode(video_norm)
         latents = posterior.mode() * self.vae.scaling_factor
         latent_cf = latents.transpose(0, 1, 4, 2, 3)  # NDHWC -> NFCHW
         B_lat, F_lat, C_lat, H_lat, W_lat = latent_cf.shape
@@ -166,7 +167,7 @@ class CogVideoXFunInpaintPipeline:
             mask_latent_1ch = mx.zeros((B_lat, F_lat, 1, H_lat, W_lat))
             masked_video_latents_cf = mx.zeros((B_lat, F_lat, C_lat, H_lat, W_lat))
         else:
-            masked_video = video * (1 - mask)
+            masked_video = video_norm * (1 - mask)  # mask in [-1,1] space
             masked_posterior = self.vae.encode(masked_video)
             masked_video_latents = masked_posterior.mode() * self.vae.scaling_factor
             masked_video_latents_cf = masked_video_latents.transpose(0, 1, 4, 2, 3)
