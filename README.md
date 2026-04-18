@@ -31,7 +31,7 @@ Available on HuggingFace:
 
 ```bash
 pip install mlx sentencepiece pillow numpy
-pip install git+https://github.com/dgrauet/mlx-ops.git
+pip install git+https://github.com/dgrauet/mlx-arsenal.git
 ```
 
 2. **Download a model** (using the HuggingFace CLI or any method you prefer):
@@ -88,7 +88,7 @@ scripts/
 ## Related Projects
 
 - [mlx-forge](https://github.com/dgrauet/mlx-forge) -- tools for porting models to MLX
-- [mlx-ops](https://github.com/dgrauet/mlx-ops) -- custom MLX operations
+- [mlx-arsenal](https://github.com/dgrauet/mlx-arsenal) -- custom MLX operations
 - [void-model-mlx](https://github.com/dgrauet/void-model-mlx) -- other MLX model ports
 
 ## Credits

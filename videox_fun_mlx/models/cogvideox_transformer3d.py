@@ -358,7 +358,7 @@ class CogVideoXPatchEmbed(nn.Module):
             target_W = width // self.patch_size
 
             if target_H != pH or target_W != pW:
-                from mlx_ops.spatial import interpolate_nearest
+                from mlx_arsenal.spatial import interpolate_nearest
                 pos_video = interpolate_nearest(pos_video, size=(pT, target_H, target_W))
 
             pos_video = pos_video.reshape(1, -1, emb_size)

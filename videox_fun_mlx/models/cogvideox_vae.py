@@ -25,7 +25,7 @@ from typing import Dict, List, Optional, Tuple, Union
 import mlx.core as mx
 import mlx.nn as nn
 
-from mlx_ops.spatial import upsample_nearest, interpolate_3d, avg_pool1d, replicate_pad
+from mlx_arsenal.spatial import upsample_nearest, interpolate_3d, avg_pool1d, replicate_pad
 
 
 class CogVideoXCausalConv3d(nn.Module):

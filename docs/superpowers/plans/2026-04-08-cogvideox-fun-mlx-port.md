@@ -4,9 +4,9 @@
 
 **Goal:** Port CogVideoX-Fun (VAE + Transformer + Inpaint Pipeline) from PyTorch/diffusers to MLX, enabling VOID model inference on Apple Silicon.
 
-**Architecture:** The port replaces PyTorch ops with MLX equivalents, leveraging `mlx-ops` (at `/Users/dgrauet/Work/mlx-ops/`) for reusable building blocks. The original code uses channels-first (NCDHW) tensors throughout; our MLX port uses channels-last (NDHWC) as MLX requires. We keep the same class names and config format so HuggingFace safetensors weights load directly. No diffusers dependency — all model code is self-contained MLX.
+**Architecture:** The port replaces PyTorch ops with MLX equivalents, leveraging `mlx-arsenal` (at `/Users/dgrauet/Work/mlx-arsenal/`) for reusable building blocks. The original code uses channels-first (NCDHW) tensors throughout; our MLX port uses channels-last (NDHWC) as MLX requires. We keep the same class names and config format so HuggingFace safetensors weights load directly. No diffusers dependency — all model code is self-contained MLX.
 
-**Tech Stack:** MLX 0.27+, mlx-ops, safetensors, numpy (for positional embeddings), einops (optional)
+**Tech Stack:** MLX 0.27+, mlx-arsenal, safetensors, numpy (for positional embeddings), einops (optional)
 
 ---
 
@@ -238,7 +238,7 @@ class TestResnetBlock3D:
 Port `videox_fun/models/cogvideox_vae.py:150-273` and `276-404`. Key changes:
 - **GroupNorm**: Use `mlx.nn.GroupNorm(... pytorch_compatible=True)`. The original uses channels-first GroupNorm; MLX GroupNorm operates on last dim by default which matches our NDHWC layout.
 - **SpatialNorm3D**: Uses `F.interpolate` for resizing `zq` to match `f`. Replace with a helper that does nearest-neighbor interpolation per dimension. For the first-frame splitting pattern (lines 183-189), implement the same logic with MLX slicing.
-- **Upsample3D**: The original uses `F.interpolate(scale_factor=2.0)`. For spatial-only upsampling, reshape to (B*D, H, W, C), use `mlx_ops.spatial.upsample_nearest`, reshape back. For compress_time mode (spatial+temporal), handle the first-frame special case.
+- **Upsample3D**: The original uses `F.interpolate(scale_factor=2.0)`. For spatial-only upsampling, reshape to (B*D, H, W, C), use `mlx_arsenal.spatial.upsample_nearest`, reshape back. For compress_time mode (spatial+temporal), handle the first-frame special case.
 - **ResnetBlock3D**: Straightforward port. Replace `get_activation("swish")` with `nn.silu`. Conv cache dict must be threaded through. The `temb` broadcast `[:, :, None, None, None]` becomes `reshape(B, 1, 1, 1, C)` for NDHWC.
 
 - [ ] **Step 7: Run tests**
@@ -753,7 +753,7 @@ git commit -m "feat: add real-weight validation script"
 |---------|-----|-------|
 | `(B, C, D, H, W)` | `(B, D, H, W, C)` | All video tensors |
 | `(B, C, H, W)` | `(B, H, W, C)` | 2D image tensors |
-| Conv3d weight `(O, I, kD, kH, kW)` | `(O, kD, kH, kW, I)` | Use `mlx_ops.layout.convert_conv_weights` |
+| Conv3d weight `(O, I, kD, kH, kW)` | `(O, kD, kH, kW, I)` | Use `mlx_arsenal.layout.convert_conv_weights` |
 | Conv2d weight `(O, I, kH, kW)` | `(O, kH, kW, I)` | Same helper |
 
 ### PyTorch Op to MLX Equivalent
@@ -763,7 +763,7 @@ git commit -m "feat: add real-weight validation script"
 | `F.scaled_dot_product_attention` | `mx.fast.scaled_dot_product_attention` |
 | `F.pad(mode="replicate")` | Manual: replicate edge slices + concatenate |
 | `F.pad(mode="constant")` | `mx.pad(...)` |
-| `F.interpolate(mode="nearest", scale_factor=2)` | `mlx_ops.spatial.upsample_nearest` or reshape+repeat |
+| `F.interpolate(mode="nearest", scale_factor=2)` | `mlx_arsenal.spatial.upsample_nearest` or reshape+repeat |
 | `F.interpolate(mode="trilinear")` | Decompose: spatial bilinear + temporal linear, or nearest approx |
 | `nn.GroupNorm` | `mlx.nn.GroupNorm(pytorch_compatible=True)` |
 | `nn.SiLU` / `F.silu` | `mlx.nn.silu` |
