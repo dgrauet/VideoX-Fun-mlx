@@ -32,9 +32,21 @@ dependencies = [
     "transformers>=4.46.2",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.7.0",
+    "ty>=0.0.0a1",
+]
+
 [project.urls]
 Repository = "https://github.com/aigc-apps/VideoX-Fun"
 # Used by Comfy Registry https://comfyregistry.org
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
 
 [tool.setuptools]
 packages = ["videox_fun"]
@@ -51,3 +63,11 @@ Icon = ""
 
 [tool.ty]
 # Strict-mode opt-in for PYTHON_QU003 (suzerain). See ADR-0003 for rationale.
+
+[tool.coverage.run]
+source = ["videox_fun"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
