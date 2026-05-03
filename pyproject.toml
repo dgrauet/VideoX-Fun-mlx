@@ -48,3 +48,6 @@ addopts = "--confcutdir=tests"
 PublisherId = "bubbliiiing"
 DisplayName = "VideoX-Fun"
 Icon = ""
+
+[tool.ty]
+# Strict-mode opt-in for PYTHON_QU003 (suzerain). See ADR-0003 for rationale.
