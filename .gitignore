@@ -178,3 +178,5 @@ vae_roundtrip.png
 *__pycache__*
 *.pyc
 .pytest_cache/
+# Local-only design artifacts (archived outside the repo per DG005)
+docs/superpowers/
