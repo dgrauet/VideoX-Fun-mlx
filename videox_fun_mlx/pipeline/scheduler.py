@@ -154,7 +154,11 @@ class DDIMScheduler:
     ) -> mx.array:
         """Add noise to original samples at the given timestep level."""
         t = int(timestep.item()) if isinstance(timestep, mx.array) else int(timestep)
-        alpha_prod_t = self.alphas_cumprod[t]
+        # Mirror diffusers add_noise: alphas cast to the sample dtype BEFORE
+        # the sqrt, so bf16 samples stay bf16. (step() deliberately keeps the
+        # torch fp32-promotion behavior; the reference pipeline casts latents
+        # back after each step — pipeline_cogvideox_fun_inpaint.py:1170.)
+        alpha_prod_t = self.alphas_cumprod[t].astype(original.dtype)
 
         sqrt_alpha_prod = mx.sqrt(alpha_prod_t)
         sqrt_one_minus_alpha_prod = mx.sqrt(1.0 - alpha_prod_t)

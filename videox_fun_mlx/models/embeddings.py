@@ -278,4 +278,10 @@ def apply_rotary_emb(
     else:
         raise ValueError(f"`use_real_unbind_dim={use_real_unbind_dim}` but should be -1 or -2.")
 
-    return x * cos + x_rotated * sin
+    # Mirror diffusers: compute the rotation in float32, cast the result
+    # back to x.dtype (embeddings.py:1231 — the deliberate fp32 island).
+    # Without the cast, fp32 cos/sin tables promote bf16 q/k to fp32 and
+    # contaminate the whole attention (MLX strict promotion).
+    return (
+        x.astype(mx.float32) * cos + x_rotated.astype(mx.float32) * sin
+    ).astype(x.dtype)

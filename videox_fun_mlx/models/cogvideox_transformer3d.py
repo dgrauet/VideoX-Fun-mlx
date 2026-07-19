@@ -632,6 +632,10 @@ class CogVideoXTransformer3DModel(nn.Module):
 
         # 1. Time embedding
         t_emb = self.time_proj(timestep)
+        # Mirror reference :597 — time_proj computes fp32 by design; cast to
+        # the hidden dtype before the embedding MLP or the fp32 temb
+        # contaminates every block's modulation path.
+        t_emb = t_emb.astype(hidden_states.dtype)
         emb = self.time_embedding(t_emb, timestep_cond)
 
         # 2. Patch embedding
