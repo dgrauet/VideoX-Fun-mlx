@@ -138,16 +138,20 @@ def quantize_model_from_weights(model, weights: dict, path: str, component: str)
     import mlx.nn as nn
 
     qconfig = get_quantize_config(path)
-    if qconfig is None:
-        return
-
-    q = qconfig.get("quantization", {})
-    skip = q.get("skip_components", [])
-    if component in skip:
-        return
-
-    bits = q.get("bits", 4)
-    group_size = q.get("group_size", 64)
+    if qconfig is not None:
+        q = qconfig.get("quantization", {})
+        if component in q.get("skip_components", []):
+            return
+        bits = q.get("bits", 4)
+        group_size = q.get("group_size", 64)
+    else:
+        # No quantize_config.json but the weights carry .scales keys (the
+        # caller checked): bits/group_size are fully determined by the
+        # shapes — for a Linear of in_dim I, scales.shape[-1] = I/group_size
+        # and the packed weight.shape[-1] = I*bits/32. Silently returning
+        # here used to leave the Linears unconverted and crash 3 layers
+        # deep in an addmm shape error.
+        bits = group_size = None
 
     # Find which layers are quantized by looking for .scales keys
     quantized_paths = set()
@@ -187,7 +191,12 @@ def quantize_model_from_weights(model, weights: dict, path: str, component: str)
 
         in_dim = linear.weight.shape[1]
         out_dim = linear.weight.shape[0]
+        if bits is None:
+            layer_group = in_dim // weights[qpath + ".scales"].shape[-1]
+            layer_bits = weights[qpath + ".weight"].shape[-1] * 32 // in_dim
+        else:
+            layer_group, layer_bits = group_size, bits
         has_bias = hasattr(linear, 'bias') and linear.bias is not None
         ql = nn.QuantizedLinear(in_dim, out_dim, bias=has_bias,
-                                group_size=group_size, bits=bits)
+                                group_size=layer_group, bits=layer_bits)
         _set_nested(model, parts, ql)
