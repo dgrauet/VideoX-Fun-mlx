@@ -7,11 +7,10 @@ All sequence operations use (B, L, D) format.
 import json
 import math
 import os
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import List, Optional, Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
-import numpy as np
 
 from .embeddings import get_3d_sincos_pos_embed, apply_rotary_emb
 
@@ -19,6 +18,7 @@ from .embeddings import get_3d_sincos_pos_embed, apply_rotary_emb
 # ---------------------------------------------------------------------------
 # Normalization layers
 # ---------------------------------------------------------------------------
+
 
 class CogVideoXLayerNormZero(nn.Module):
     """Modulated LayerNorm producing shift/scale/gate for video and text streams."""
@@ -70,6 +70,7 @@ class AdaLayerNorm(nn.Module):
 # Feed-forward
 # ---------------------------------------------------------------------------
 
+
 class _GELUApprox(nn.Module):
     """GELU activation with linear projection (diffusers GELU wrapper)."""
 
@@ -118,9 +119,9 @@ class FeedForward(nn.Module):
             act = _GELUApprox(dim, inner_dim, bias=bias)
 
         self.net = [
-            act,                                       # net.0 (with .proj)
-            nn.Dropout(p=dropout),                     # net.1
-            nn.Linear(inner_dim, dim, bias=bias),      # net.2
+            act,  # net.0 (with .proj)
+            nn.Dropout(p=dropout),  # net.1
+            nn.Linear(inner_dim, dim, bias=bias),  # net.2
         ]
 
     def __call__(self, x):
@@ -132,6 +133,7 @@ class FeedForward(nn.Module):
 # ---------------------------------------------------------------------------
 # Attention
 # ---------------------------------------------------------------------------
+
 
 class Attention(nn.Module):
     """Multi-head attention with optional QK normalization."""
@@ -209,7 +211,7 @@ class Attention(nn.Module):
             k = mx.concatenate([k_text, k_video], axis=2)
 
         # SDPA
-        scale = self.dim_head ** -0.5
+        scale = self.dim_head**-0.5
         out = mx.fast.scaled_dot_product_attention(q, k, v, scale=scale)
 
         # Reshape back to (B, L, H*D)
@@ -225,6 +227,7 @@ class Attention(nn.Module):
 # ---------------------------------------------------------------------------
 # Patch Embedding
 # ---------------------------------------------------------------------------
+
 
 class CogVideoXPatchEmbed(nn.Module):
     """Patch embedding for CogVideoX."""
@@ -268,7 +271,8 @@ class CogVideoXPatchEmbed(nn.Module):
         if patch_size_t is None:
             # CogVideoX 1.0: Conv2d patchification
             self.proj = nn.Conv2d(
-                in_channels, embed_dim,
+                in_channels,
+                embed_dim,
                 kernel_size=(patch_size, patch_size),
                 stride=(patch_size, patch_size),
                 bias=bias,
@@ -332,9 +336,7 @@ class CogVideoXPatchEmbed(nn.Module):
             p_t = self.patch_size_t
             # (B, F, C, H, W) -> (B, F, H, W, C)
             img = image_embeds.transpose(0, 1, 3, 4, 2)
-            img = img.reshape(
-                B, num_frames // p_t, p_t, height // p, p, width // p, p, channels
-            )
+            img = img.reshape(B, num_frames // p_t, p_t, height // p, p, width // p, p, channels)
             img = img.transpose(0, 1, 3, 5, 7, 2, 4, 6)
             img = img.reshape(B, -1, channels * p_t * p * p)
             image_embeds = self.proj(img)
@@ -342,7 +344,7 @@ class CogVideoXPatchEmbed(nn.Module):
         embeds = mx.concatenate([text_embeds, image_embeds], axis=1)
 
         if self.use_positional_embeddings or self.use_learned_positional_embeddings:
-            seq_length = height * width * num_frames // (self.patch_size ** 2)
+            seq_length = height * width * num_frames // (self.patch_size**2)
             pos_embeds = self.pos_embedding
 
             # Interpolate pos embeddings for variable resolution via nearest
@@ -353,17 +355,17 @@ class CogVideoXPatchEmbed(nn.Module):
             pW = self.post_patch_width
             pos_video = pos_video.reshape(1, pT, pH, pW, emb_size)
 
-            target_T = pT
             target_H = height // self.patch_size
             target_W = width // self.patch_size
 
             if target_H != pH or target_W != pW:
                 from mlx_arsenal.spatial import interpolate_nearest
+
                 pos_video = interpolate_nearest(pos_video, size=(pT, target_H, target_W))
 
             pos_video = pos_video.reshape(1, -1, emb_size)
             pos_embeds = mx.concatenate([pos_embeds[:, :text_seq_length], pos_video], axis=1)
-            pos_embeds = pos_embeds[:, :text_seq_length + seq_length]
+            pos_embeds = pos_embeds[:, : text_seq_length + seq_length]
             embeds = embeds + pos_embeds
 
         return embeds
@@ -372,6 +374,7 @@ class CogVideoXPatchEmbed(nn.Module):
 # ---------------------------------------------------------------------------
 # Transformer Block
 # ---------------------------------------------------------------------------
+
 
 class CogVideoXBlock(nn.Module):
     """Transformer block for CogVideoX."""
@@ -395,9 +398,7 @@ class CogVideoXBlock(nn.Module):
     ):
         super().__init__()
 
-        self.norm1 = CogVideoXLayerNormZero(
-            time_embed_dim, dim, norm_elementwise_affine, norm_eps, bias=True
-        )
+        self.norm1 = CogVideoXLayerNormZero(time_embed_dim, dim, norm_elementwise_affine, norm_eps, bias=True)
         self.attn1 = Attention(
             query_dim=dim,
             heads=num_attention_heads,
@@ -407,12 +408,8 @@ class CogVideoXBlock(nn.Module):
             qk_norm=qk_norm,
             eps=1e-6,
         )
-        self.norm2 = CogVideoXLayerNormZero(
-            time_embed_dim, dim, norm_elementwise_affine, norm_eps, bias=True
-        )
-        self.ff = FeedForward(
-            dim, inner_dim=ff_inner_dim or 0, dropout=dropout, bias=ff_bias
-        )
+        self.norm2 = CogVideoXLayerNormZero(time_embed_dim, dim, norm_elementwise_affine, norm_eps, bias=True)
+        self.ff = FeedForward(dim, inner_dim=ff_inner_dim or 0, dropout=dropout, bias=ff_bias)
 
     def __call__(
         self,
@@ -424,9 +421,7 @@ class CogVideoXBlock(nn.Module):
         text_seq_length = encoder_hidden_states.shape[1]
 
         # Norm + modulate
-        norm_h, norm_e, gate_msa, enc_gate_msa = self.norm1(
-            hidden_states, encoder_hidden_states, temb
-        )
+        norm_h, norm_e, gate_msa, enc_gate_msa = self.norm1(hidden_states, encoder_hidden_states, temb)
 
         # Attention
         attn_h, attn_e = self.attn1(
@@ -439,9 +434,7 @@ class CogVideoXBlock(nn.Module):
         encoder_hidden_states = encoder_hidden_states + enc_gate_msa * attn_e
 
         # Norm + modulate
-        norm_h, norm_e, gate_ff, enc_gate_ff = self.norm2(
-            hidden_states, encoder_hidden_states, temb
-        )
+        norm_h, norm_e, gate_ff, enc_gate_ff = self.norm2(hidden_states, encoder_hidden_states, temb)
 
         # Feed-forward on concatenated
         ff_input = mx.concatenate([norm_e, norm_h], axis=1)
@@ -456,6 +449,7 @@ class CogVideoXBlock(nn.Module):
 # ---------------------------------------------------------------------------
 # Timestep Embedding
 # ---------------------------------------------------------------------------
+
 
 class Timesteps(nn.Module):
     """Sinusoidal timestep embeddings."""
@@ -494,6 +488,7 @@ class TimestepEmbedding(nn.Module):
 # ---------------------------------------------------------------------------
 # Full Transformer Model
 # ---------------------------------------------------------------------------
+
 
 class CogVideoXTransformer3DModel(nn.Module):
     """CogVideoX Transformer for video generation/inpainting."""
@@ -673,9 +668,7 @@ class CogVideoXTransformer3DModel(nn.Module):
         # 5. Unpatchify
         if p_t is None:
             out_channels = self._config["out_channels"] or channels
-            output = hidden_states.reshape(
-                batch_size, local_num_frames, height // p, width // p, out_channels, p, p
-            )
+            output = hidden_states.reshape(batch_size, local_num_frames, height // p, width // p, out_channels, p, p)
             output = output.transpose(0, 1, 4, 2, 5, 3, 6)
             output = output.reshape(batch_size, local_num_frames, out_channels, height, width)
         else:
@@ -684,9 +677,7 @@ class CogVideoXTransformer3DModel(nn.Module):
                 batch_size, (local_num_frames + p_t - 1) // p_t, height // p, width // p, out_channels, p_t, p, p
             )
             output = output.transpose(0, 1, 5, 4, 2, 6, 3, 7)
-            output = output.reshape(
-                batch_size, -1, out_channels, height, width
-            )
+            output = output.reshape(batch_size, -1, out_channels, height, width)
 
         if num_frames == 1:
             output = output[:, :num_frames]
@@ -722,14 +713,33 @@ class CogVideoXTransformer3DModel(nn.Module):
                 config = config["transformer"]
 
         init_keys = {
-            "num_attention_heads", "attention_head_dim", "in_channels", "out_channels",
-            "flip_sin_to_cos", "freq_shift", "time_embed_dim", "text_embed_dim",
-            "num_layers", "dropout", "attention_bias", "sample_width", "sample_height",
-            "sample_frames", "patch_size", "patch_size_t", "temporal_compression_ratio",
-            "max_text_seq_length", "activation_fn", "timestep_activation_fn",
-            "norm_elementwise_affine", "norm_eps", "spatial_interpolation_scale",
-            "temporal_interpolation_scale", "use_rotary_positional_embeddings",
-            "use_learned_positional_embeddings", "patch_bias",
+            "num_attention_heads",
+            "attention_head_dim",
+            "in_channels",
+            "out_channels",
+            "flip_sin_to_cos",
+            "freq_shift",
+            "time_embed_dim",
+            "text_embed_dim",
+            "num_layers",
+            "dropout",
+            "attention_bias",
+            "sample_width",
+            "sample_height",
+            "sample_frames",
+            "patch_size",
+            "patch_size_t",
+            "temporal_compression_ratio",
+            "max_text_seq_length",
+            "activation_fn",
+            "timestep_activation_fn",
+            "norm_elementwise_affine",
+            "norm_eps",
+            "spatial_interpolation_scale",
+            "temporal_interpolation_scale",
+            "use_rotary_positional_embeddings",
+            "use_learned_positional_embeddings",
+            "patch_bias",
             "add_noise_in_inpaint_model",
         }
         filtered_config = {k: v for k, v in config.items() if k in init_keys}
@@ -738,6 +748,7 @@ class CogVideoXTransformer3DModel(nn.Module):
         model = cls(**filtered_config)
         weights = load_mlx_weights(pretrained_model_path, "transformer")
         from videox_fun_mlx.utils import quantize_model_from_weights
+
         quantize_model_from_weights(model, weights, pretrained_model_path, "transformer")
         if "in_channels" in transformer_additional_kwargs:
             # When in_channels is overridden (e.g. VOID uses 48 vs base 33),
@@ -747,10 +758,14 @@ class CogVideoXTransformer3DModel(nn.Module):
             p_t = filtered_config.get("patch_size_t", 2)
             expected_dim = model_in_ch * p * p * (p_t or 1)
             filtered_weights = {
-                k: v for k, v in weights.items()
+                k: v
+                for k, v in weights.items()
                 if not (k == "patch_embed.proj.weight" and v.shape[-1] != expected_dim)
-                and not (k == "patch_embed.proj.bias" and "patch_embed.proj.weight" in weights
-                         and weights["patch_embed.proj.weight"].shape[-1] != expected_dim)
+                and not (
+                    k == "patch_embed.proj.bias"
+                    and "patch_embed.proj.weight" in weights
+                    and weights["patch_embed.proj.weight"].shape[-1] != expected_dim
+                )
             }
             model.load_weights(list(filtered_weights.items()), strict=False)
         else:

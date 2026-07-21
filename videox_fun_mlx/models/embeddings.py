@@ -16,6 +16,7 @@ import numpy as np
 # 1D sinusoidal helpers (numpy, computed once)
 # ---------------------------------------------------------------------------
 
+
 def _get_1d_sincos_pos_embed_from_grid(embed_dim: int, pos: np.ndarray) -> np.ndarray:
     """1D sinusoidal positional embedding from a position grid.
 
@@ -59,6 +60,7 @@ def _get_2d_sincos_pos_embed_from_grid(embed_dim: int, grid: np.ndarray) -> np.n
 # ---------------------------------------------------------------------------
 # 3D sinusoidal positional embedding
 # ---------------------------------------------------------------------------
+
 
 def get_3d_sincos_pos_embed(
     embed_dim: int,
@@ -118,6 +120,7 @@ def get_3d_sincos_pos_embed(
 # 1D rotary positional embedding helper
 # ---------------------------------------------------------------------------
 
+
 def _get_1d_rotary_pos_embed(
     dim: int,
     pos: np.ndarray,
@@ -152,6 +155,7 @@ def _get_1d_rotary_pos_embed(
 # ---------------------------------------------------------------------------
 # 3D rotary positional embedding (RoPE for video tokens)
 # ---------------------------------------------------------------------------
+
 
 def get_3d_rotary_pos_embed(
     embed_dim: int,
@@ -210,9 +214,7 @@ def get_3d_rotary_pos_embed(
         h_cos, h_sin = h_cos[:grid_size_h], h_sin[:grid_size_h]
         w_cos, w_sin = w_cos[:grid_size_w], w_sin[:grid_size_w]
 
-    def combine_time_height_width(
-        freqs_t: np.ndarray, freqs_h: np.ndarray, freqs_w: np.ndarray
-    ) -> np.ndarray:
+    def combine_time_height_width(freqs_t: np.ndarray, freqs_h: np.ndarray, freqs_w: np.ndarray) -> np.ndarray:
         # Broadcast to (T, H, W, dim_axis) then concatenate along last dim
         ft = np.tile(freqs_t[:, None, None, :], (1, grid_size_h, grid_size_w, 1))
         fh = np.tile(freqs_h[None, :, None, :], (temporal_size, 1, grid_size_w, 1))
@@ -228,6 +230,7 @@ def get_3d_rotary_pos_embed(
 # ---------------------------------------------------------------------------
 # Apply rotary embedding
 # ---------------------------------------------------------------------------
+
 
 def apply_rotary_emb(
     x: mx.array,
@@ -282,6 +285,4 @@ def apply_rotary_emb(
     # back to x.dtype (embeddings.py:1231 — the deliberate fp32 island).
     # Without the cast, fp32 cos/sin tables promote bf16 q/k to fp32 and
     # contaminate the whole attention (MLX strict promotion).
-    return (
-        x.astype(mx.float32) * cos + x_rotated.astype(mx.float32) * sin
-    ).astype(x.dtype)
+    return (x.astype(mx.float32) * cos + x_rotated.astype(mx.float32) * sin).astype(x.dtype)

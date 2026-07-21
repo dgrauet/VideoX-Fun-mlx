@@ -49,9 +49,7 @@ class T5Attention(nn.Module):
         self.o = nn.Linear(num_heads * d_kv, d_model, bias=False)
 
         if has_relative_attention_bias:
-            self.relative_attention_bias = nn.Embedding(
-                relative_attention_num_buckets, num_heads
-            )
+            self.relative_attention_bias = nn.Embedding(relative_attention_num_buckets, num_heads)
             self.relative_attention_num_buckets = relative_attention_num_buckets
             self.relative_attention_max_distance = relative_attention_max_distance
 
@@ -69,17 +67,12 @@ class T5Attention(nn.Module):
 
         max_exact = num_buckets // 2
         is_small = relative_position < max_exact
-        relative_position_if_large = (
-            max_exact
-            + (
-                mx.log(relative_position.astype(mx.float32) / max_exact)
-                / math.log(max_distance / max_exact)
-                * (num_buckets - max_exact)
-            ).astype(mx.int32)
-        )
-        relative_position_if_large = mx.minimum(
-            relative_position_if_large, mx.array(num_buckets - 1)
-        )
+        relative_position_if_large = max_exact + (
+            mx.log(relative_position.astype(mx.float32) / max_exact)
+            / math.log(max_distance / max_exact)
+            * (num_buckets - max_exact)
+        ).astype(mx.int32)
+        relative_position_if_large = mx.minimum(relative_position_if_large, mx.array(num_buckets - 1))
         relative_buckets = relative_buckets + mx.where(
             is_small, relative_position.astype(mx.int32), relative_position_if_large
         )
@@ -115,7 +108,7 @@ class T5Attention(nn.Module):
         if position_bias is None and self.has_relative_attention_bias:
             position_bias = self.compute_bias(L, L)
 
-        scale = self.d_kv ** -0.5
+        scale = self.d_kv**-0.5
         scores = (q * scale) @ k.transpose(0, 1, 3, 2)
 
         if position_bias is not None:
@@ -165,7 +158,10 @@ class T5Block(nn.Module):
         # layer.0 = self-attention sublayer
         self.layer = [
             T5AttentionSublayer(
-                d_model, d_kv, num_heads, eps,
+                d_model,
+                d_kv,
+                num_heads,
+                eps,
                 has_relative_attention_bias,
                 relative_attention_num_buckets,
                 relative_attention_max_distance,
@@ -186,7 +182,12 @@ class T5AttentionSublayer(nn.Module):
         super().__init__()
         self.layer_norm = T5RMSNorm(d_model, eps)
         self.SelfAttention = T5Attention(
-            d_model, d_kv, num_heads, has_rpb, num_buckets, max_dist,
+            d_model,
+            d_kv,
+            num_heads,
+            has_rpb,
+            num_buckets,
+            max_dist,
         )
 
     def __call__(self, x, position_bias=None, attention_mask=None):
@@ -225,7 +226,14 @@ class T5Encoder(nn.Module):
 
         self.shared = nn.Embedding(vocab_size, d_model)
         self.encoder = T5EncoderStack(
-            d_model, d_ff, d_kv, num_heads, num_layers, eps, num_buckets, max_dist,
+            d_model,
+            d_ff,
+            d_kv,
+            num_heads,
+            num_layers,
+            eps,
+            num_buckets,
+            max_dist,
         )
 
     def __call__(self, input_ids: mx.array) -> mx.array:
@@ -273,6 +281,7 @@ class T5Encoder(nn.Module):
         weights_file = os.path.join(model_path, "text_encoder.safetensors")
         if not os.path.exists(weights_file):
             from pathlib import Path
+
             te_dir = Path(model_path) / "text_encoder"
             if te_dir.is_dir():
                 shard_files = sorted(te_dir.glob("*.safetensors"))
@@ -282,6 +291,7 @@ class T5Encoder(nn.Module):
                         weights.update(mx.load(str(sf)))
                     cleaned = {k.removeprefix("text_encoder."): v for k, v in weights.items()}
                     from videox_fun_mlx.utils import quantize_model_from_weights
+
                     quantize_model_from_weights(model, cleaned, model_path, "text_encoder")
                     model.load_weights(list(cleaned.items()))
                     return model
@@ -290,6 +300,7 @@ class T5Encoder(nn.Module):
         weights = mx.load(weights_file)
         cleaned = {k.removeprefix("text_encoder."): v for k, v in weights.items()}
         from videox_fun_mlx.utils import quantize_model_from_weights
+
         quantize_model_from_weights(model, cleaned, model_path, "text_encoder")
         model.load_weights(list(cleaned.items()))
         return model
@@ -302,12 +313,18 @@ class T5EncoderStack(nn.Module):
         super().__init__()
         self.block = []
         for i in range(num_layers):
-            self.block.append(T5Block(
-                d_model, d_ff, d_kv, num_heads, eps,
-                has_relative_attention_bias=(i == 0),
-                relative_attention_num_buckets=num_buckets,
-                relative_attention_max_distance=max_dist,
-            ))
+            self.block.append(
+                T5Block(
+                    d_model,
+                    d_ff,
+                    d_kv,
+                    num_heads,
+                    eps,
+                    has_relative_attention_bias=(i == 0),
+                    relative_attention_num_buckets=num_buckets,
+                    relative_attention_max_distance=max_dist,
+                )
+            )
         self.final_layer_norm = T5RMSNorm(d_model, eps)
 
     def __call__(self, x: mx.array, attention_mask: Optional[mx.array] = None) -> mx.array:

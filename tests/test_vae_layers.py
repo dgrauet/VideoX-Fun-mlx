@@ -1,7 +1,6 @@
 """Tests for VAE foundation layers: CausalConv3d, ResnetBlock3D, SpatialNorm3D, Upsample3D."""
 
 import mlx.core as mx
-import pytest
 
 from videox_fun_mlx.models.cogvideox_vae import (
     CogVideoXCausalConv3d,
@@ -172,9 +171,7 @@ class TestResnetBlock3D:
 
     def test_conv_shortcut(self):
         """ResnetBlock3D with conv_shortcut=True for channel change."""
-        block = CogVideoXResnetBlock3D(
-            in_channels=32, out_channels=64, conv_shortcut=True
-        )
+        block = CogVideoXResnetBlock3D(in_channels=32, out_channels=64, conv_shortcut=True)
         x = mx.random.normal((1, 4, 8, 8, 32))
         out, cache = block(x)
         mx.eval(out)

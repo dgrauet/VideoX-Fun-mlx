@@ -42,9 +42,7 @@ def test_infers_bits_and_group_size_without_config(tmp_path, bits, group_size):
     model = Tiny()
     quantize_model_from_weights(model, weights, str(tmp_path), "transformer")
 
-    assert isinstance(model.proj, nn.QuantizedLinear), (
-        "Linear must be converted even without quantize_config.json"
-    )
+    assert isinstance(model.proj, nn.QuantizedLinear), "Linear must be converted even without quantize_config.json"
     assert model.proj.bits == bits
     assert model.proj.group_size == group_size
 
@@ -58,9 +56,7 @@ def test_infers_bits_and_group_size_without_config(tmp_path, bits, group_size):
 def test_config_file_still_wins(tmp_path):
     """Explicit quantize_config.json keeps taking precedence."""
     _, weights = _quantized_weights(4, 32)
-    (tmp_path / "quantize_config.json").write_text(
-        json.dumps({"quantization": {"bits": 4, "group_size": 32}})
-    )
+    (tmp_path / "quantize_config.json").write_text(json.dumps({"quantization": {"bits": 4, "group_size": 32}}))
     model = Tiny()
     quantize_model_from_weights(model, weights, str(tmp_path), "transformer")
     assert isinstance(model.proj, nn.QuantizedLinear)

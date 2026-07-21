@@ -16,6 +16,7 @@ class T5Tokenizer:
 
     def __init__(self, model_path: str, max_length: int = 226):
         import sentencepiece as spm
+
         # Try multiple locations
         candidates = [
             os.path.join(model_path, "tokenizer_spiece.model"),

@@ -1,7 +1,6 @@
 """Tests for positional embeddings (Task 4) and transformer components (Task 5)."""
 
 import mlx.core as mx
-import numpy as np
 import pytest
 
 from videox_fun_mlx.models.embeddings import (

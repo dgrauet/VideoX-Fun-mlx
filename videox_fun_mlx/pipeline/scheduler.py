@@ -4,7 +4,6 @@ Supports v-prediction, trailing timestep spacing, and zero-SNR rescaling
 as used by CogVideoXDDIMScheduler in diffusers.
 """
 
-import math
 import mlx.core as mx
 
 
@@ -71,8 +70,10 @@ class DDIMScheduler:
         # Last element must be 0
         alphas_bar_sqrt_0 = alphas_bar_sqrt[0]
         alphas_bar_sqrt_T = alphas_bar_sqrt[-1]
-        alphas_bar_sqrt = (alphas_bar_sqrt - alphas_bar_sqrt_T) * alphas_bar_sqrt_0 / (alphas_bar_sqrt_0 - alphas_bar_sqrt_T)
-        alphas_cumprod = alphas_bar_sqrt ** 2
+        alphas_bar_sqrt = (
+            (alphas_bar_sqrt - alphas_bar_sqrt_T) * alphas_bar_sqrt_0 / (alphas_bar_sqrt_0 - alphas_bar_sqrt_T)
+        )
+        alphas_cumprod = alphas_bar_sqrt**2
         # Reconstruct betas
         alphas = alphas_cumprod[1:] / alphas_cumprod[:-1]
         alphas = mx.concatenate([alphas_cumprod[:1], alphas])

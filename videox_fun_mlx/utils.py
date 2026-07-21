@@ -37,7 +37,6 @@ def load_config(path: str) -> dict:
 
 def load_weights(path: str) -> dict:
     """Load safetensors weights from a directory, handling sharded files."""
-    from pathlib import Path
 
     p = Path(path)
     safetensors_files = sorted(p.glob("*.safetensors"))
@@ -95,7 +94,6 @@ def load_mlx_weights(path: str, component: str) -> dict:
 
     Returns weights with the component prefix stripped.
     """
-    from pathlib import Path
     p = Path(path)
 
     # Try mlx-forge flat format first: transformer.safetensors, vae.safetensors
@@ -196,7 +194,6 @@ def quantize_model_from_weights(model, weights: dict, path: str, component: str)
             layer_bits = weights[qpath + ".weight"].shape[-1] * 32 // in_dim
         else:
             layer_group, layer_bits = group_size, bits
-        has_bias = hasattr(linear, 'bias') and linear.bias is not None
-        ql = nn.QuantizedLinear(in_dim, out_dim, bias=has_bias,
-                                group_size=layer_group, bits=layer_bits)
+        has_bias = hasattr(linear, "bias") and linear.bias is not None
+        ql = nn.QuantizedLinear(in_dim, out_dim, bias=has_bias, group_size=layer_group, bits=layer_bits)
         _set_nested(model, parts, ql)

@@ -7,7 +7,6 @@ Complete pipeline matching the original VideoX-Fun implementation:
 - Dynamic CFG support
 """
 
-import math
 from typing import Optional, Tuple
 
 import mlx.core as mx
@@ -78,7 +77,10 @@ class CogVideoXFunInpaintPipeline:
         return pos_embeds
 
     def _prepare_rotary_embeddings(
-        self, height: int, width: int, num_latent_frames: int,
+        self,
+        height: int,
+        width: int,
+        num_latent_frames: int,
     ) -> Optional[Tuple[mx.array, mx.array]]:
         """Compute 3D RoPE matching the original pipeline exactly."""
         if not self.transformer._config.get("use_rotary_positional_embeddings"):
@@ -256,6 +258,7 @@ class CogVideoXFunInpaintPipeline:
         sched_file = os.path.join(model_path, "scheduler_scheduler_config.json")
         if os.path.exists(sched_file):
             import json
+
             with open(sched_file) as f:
                 scheduler_config = json.load(f)
             for k in ("_class_name", "_diffusers_version", "trained_betas"):
@@ -264,6 +267,9 @@ class CogVideoXFunInpaintPipeline:
         scheduler = DDIMScheduler(**scheduler_config)
 
         return cls(
-            vae=vae, transformer=transformer, scheduler=scheduler,
-            text_encoder=text_encoder, tokenizer=tokenizer,
+            vae=vae,
+            transformer=transformer,
+            scheduler=scheduler,
+            text_encoder=text_encoder,
+            tokenizer=tokenizer,
         )

@@ -39,9 +39,7 @@ class TestRotaryEmbDtype:
         paired = xf.reshape(1, 2, 6, 4, 2)
         rot = mx.stack([-paired[..., 1], paired[..., 0]], axis=-1).reshape(x.shape)
         want = (xf * cos + rot * sin).astype(mx.bfloat16)
-        assert np.array_equal(
-            np.array(out.astype(mx.float32)), np.array(want.astype(mx.float32))
-        )
+        assert np.array_equal(np.array(out.astype(mx.float32)), np.array(want.astype(mx.float32)))
 
 
 class TestSchedulerDtype:
@@ -101,6 +99,4 @@ class TestTransformerDtype:
             encoder_hidden_states=text,
             timestep=mx.array([500]),
         )
-        assert out.dtype == mx.bfloat16, (
-            "fp32 leaked into the forward (t_emb island cast missing?)"
-        )
+        assert out.dtype == mx.bfloat16, "fp32 leaked into the forward (t_emb island cast missing?)"
