@@ -47,12 +47,15 @@ Repository = "https://github.com/aigc-apps/VideoX-Fun"
 [tool.ruff]
 line-length = 120
 target-version = "py310"
+# videox_fun/ is vendored upstream (aigc-apps/VideoX-Fun) — kept iso-upstream, not linted.
+extend-exclude = ["videox_fun"]
 
 [tool.setuptools]
 packages = ["videox_fun"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 norecursedirs = ["comfyui", "videox_fun", ".venv"]
 addopts = "--confcutdir=tests"
 
