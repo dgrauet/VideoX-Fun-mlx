@@ -63,19 +63,18 @@ class CogVideoXCausalConv3d(nn.Module):
         self.time_kernel_size = time_kernel_size
 
         stride = stride if isinstance(stride, tuple) else (stride, 1, 1)
-        dilation_tuple = (dilation, 1, 1)
+        dilation = (dilation, 1, 1)
         self.conv = nn.Conv3d(
             in_channels,
             out_channels,
             kernel_size=kernel_size,
             stride=stride,
             padding=0,
+            dilation=dilation,
             bias=True,
         )
 
-    def __call__(
-        self, inputs: mx.array, conv_cache: Optional[mx.array] = None
-    ) -> Tuple[mx.array, Optional[mx.array]]:
+    def __call__(self, inputs: mx.array, conv_cache: Optional[mx.array] = None) -> Tuple[mx.array, Optional[mx.array]]:
         """Forward pass.
 
         Args:
@@ -88,13 +87,16 @@ class CogVideoXCausalConv3d(nn.Module):
         new_cache = None
 
         if self.pad_mode == "replicate":
-            inputs = replicate_pad(inputs, [
-                (0, 0),
-                (self.time_pad, 0),
-                (self.height_pad, self.height_pad),
-                (self.width_pad, self.width_pad),
-                (0, 0),
-            ])
+            inputs = replicate_pad(
+                inputs,
+                [
+                    (0, 0),
+                    (self.time_pad, 0),
+                    (self.height_pad, self.height_pad),
+                    (self.width_pad, self.width_pad),
+                    (0, 0),
+                ],
+            )
         else:
             # Constant pad mode with cache support
             if self.time_kernel_size > 1:
@@ -104,11 +106,7 @@ class CogVideoXCausalConv3d(nn.Module):
                     cached = [mx.repeat(inputs[:, :1], self.time_pad, axis=1)]
                 inputs = mx.concatenate(cached + [inputs], axis=1)
 
-            new_cache = (
-                inputs[:, -self.time_kernel_size + 1 :]
-                if self.time_kernel_size > 1
-                else None
-            )
+            new_cache = inputs[:, -self.time_kernel_size + 1 :] if self.time_kernel_size > 1 else None
 
             # Spatial padding
             if self.height_pad > 0 or self.width_pad > 0:
@@ -145,15 +143,9 @@ class CogVideoXSpatialNorm3D(nn.Module):
         groups: int = 32,
     ):
         super().__init__()
-        self.norm_layer = nn.GroupNorm(
-            num_groups=groups, dims=f_channels, pytorch_compatible=True
-        )
-        self.conv_y = CogVideoXCausalConv3d(
-            zq_channels, f_channels, kernel_size=1, stride=1
-        )
-        self.conv_b = CogVideoXCausalConv3d(
-            zq_channels, f_channels, kernel_size=1, stride=1
-        )
+        self.norm_layer = nn.GroupNorm(num_groups=groups, dims=f_channels, pytorch_compatible=True)
+        self.conv_y = CogVideoXCausalConv3d(zq_channels, f_channels, kernel_size=1, stride=1)
+        self.conv_b = CogVideoXCausalConv3d(zq_channels, f_channels, kernel_size=1, stride=1)
 
     def __call__(
         self,
@@ -192,12 +184,8 @@ class CogVideoXSpatialNorm3D(nn.Module):
         else:
             zq = interpolate_3d(zq, (f_d, f_h, f_w))
 
-        conv_y, new_conv_cache["conv_y"] = self.conv_y(
-            zq, conv_cache=conv_cache.get("conv_y")
-        )
-        conv_b, new_conv_cache["conv_b"] = self.conv_b(
-            zq, conv_cache=conv_cache.get("conv_b")
-        )
+        conv_y, new_conv_cache["conv_y"] = self.conv_y(zq, conv_cache=conv_cache.get("conv_y"))
+        conv_b, new_conv_cache["conv_b"] = self.conv_b(zq, conv_cache=conv_cache.get("conv_b"))
 
         norm_f = self.norm_layer(f)
         new_f = norm_f * conv_y + conv_b
@@ -340,12 +328,8 @@ class CogVideoXResnetBlock3D(nn.Module):
         self.spatial_norm_dim = spatial_norm_dim
 
         if spatial_norm_dim is None:
-            self.norm1 = nn.GroupNorm(
-                num_groups=groups, dims=in_channels, pytorch_compatible=True
-            )
-            self.norm2 = nn.GroupNorm(
-                num_groups=groups, dims=out_channels, pytorch_compatible=True
-            )
+            self.norm1 = nn.GroupNorm(num_groups=groups, dims=in_channels, pytorch_compatible=True)
+            self.norm2 = nn.GroupNorm(num_groups=groups, dims=out_channels, pytorch_compatible=True)
         else:
             self.norm1 = CogVideoXSpatialNorm3D(
                 f_channels=in_channels,
@@ -417,35 +401,25 @@ class CogVideoXResnetBlock3D(nn.Module):
         hidden_states = inputs
 
         if zq is not None:
-            hidden_states, new_conv_cache["norm1"] = self.norm1(
-                hidden_states, zq, conv_cache=conv_cache.get("norm1")
-            )
+            hidden_states, new_conv_cache["norm1"] = self.norm1(hidden_states, zq, conv_cache=conv_cache.get("norm1"))
         else:
             hidden_states = self.norm1(hidden_states)
 
         hidden_states = self.nonlinearity(hidden_states)
-        hidden_states, new_conv_cache["conv1"] = self.conv1(
-            hidden_states, conv_cache=conv_cache.get("conv1")
-        )
+        hidden_states, new_conv_cache["conv1"] = self.conv1(hidden_states, conv_cache=conv_cache.get("conv1"))
 
         if temb is not None:
             # temb is (B, temb_channels), project and broadcast to (B, 1, 1, 1, C)
-            hidden_states = hidden_states + self.temb_proj(
-                self.nonlinearity(temb)
-            ).reshape(temb.shape[0], 1, 1, 1, -1)
+            hidden_states = hidden_states + self.temb_proj(self.nonlinearity(temb)).reshape(temb.shape[0], 1, 1, 1, -1)
 
         if zq is not None:
-            hidden_states, new_conv_cache["norm2"] = self.norm2(
-                hidden_states, zq, conv_cache=conv_cache.get("norm2")
-            )
+            hidden_states, new_conv_cache["norm2"] = self.norm2(hidden_states, zq, conv_cache=conv_cache.get("norm2"))
         else:
             hidden_states = self.norm2(hidden_states)
 
         hidden_states = self.nonlinearity(hidden_states)
         hidden_states = self.dropout(hidden_states)
-        hidden_states, new_conv_cache["conv2"] = self.conv2(
-            hidden_states, conv_cache=conv_cache.get("conv2")
-        )
+        hidden_states, new_conv_cache["conv2"] = self.conv2(hidden_states, conv_cache=conv_cache.get("conv2"))
 
         if self.in_channels != self.out_channels:
             if self.use_conv_shortcut:
@@ -486,8 +460,12 @@ class CogVideoXDownsample3D(nn.Module):
         super().__init__()
         self.compress_time = compress_time
         self.conv = nn.Conv2d(
-            in_channels, out_channels,
-            kernel_size=kernel_size, stride=stride, padding=padding, bias=True,
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            bias=True,
         )
 
     def __call__(self, inputs: mx.array) -> mx.array:
@@ -861,9 +839,7 @@ class CogVideoXEncoder3D(nn.Module):
 
         temporal_compress_level = int(math.log2(temporal_compression_ratio))
 
-        self.conv_in = CogVideoXCausalConv3d(
-            in_channels, block_out_channels[0], kernel_size=3, pad_mode=pad_mode
-        )
+        self.conv_in = CogVideoXCausalConv3d(in_channels, block_out_channels[0], kernel_size=3, pad_mode=pad_mode)
         self.down_blocks: List[CogVideoXDownBlock3D] = []
 
         # Down blocks
@@ -875,9 +851,7 @@ class CogVideoXEncoder3D(nn.Module):
             compress_time = i < temporal_compress_level
 
             if down_block_type != "CogVideoXDownBlock3D":
-                raise ValueError(
-                    "Invalid `down_block_type`. Must be `CogVideoXDownBlock3D`"
-                )
+                raise ValueError("Invalid `down_block_type`. Must be `CogVideoXDownBlock3D`")
 
             down_block = CogVideoXDownBlock3D(
                 in_channels=input_channel,
@@ -905,9 +879,7 @@ class CogVideoXEncoder3D(nn.Module):
             pad_mode=pad_mode,
         )
 
-        self.norm_out = nn.GroupNorm(
-            norm_num_groups, block_out_channels[-1], pytorch_compatible=True
-        )
+        self.norm_out = nn.GroupNorm(norm_num_groups, block_out_channels[-1], pytorch_compatible=True)
         self.conv_act = nn.SiLU()
         self.conv_out = CogVideoXCausalConv3d(
             block_out_channels[-1], 2 * out_channels, kernel_size=3, pad_mode=pad_mode
@@ -933,9 +905,7 @@ class CogVideoXEncoder3D(nn.Module):
         new_conv_cache: Dict[str, mx.array] = {}
         conv_cache = conv_cache or {}
 
-        hidden_states, new_conv_cache["conv_in"] = self.conv_in(
-            sample, conv_cache=conv_cache.get("conv_in")
-        )
+        hidden_states, new_conv_cache["conv_in"] = self.conv_in(sample, conv_cache=conv_cache.get("conv_in"))
 
         # 1. Down
         for i, down_block in enumerate(self.down_blocks):
@@ -952,9 +922,7 @@ class CogVideoXEncoder3D(nn.Module):
         # 3. Post-process
         hidden_states = self.norm_out(hidden_states)
         hidden_states = self.conv_act(hidden_states)
-        hidden_states, new_conv_cache["conv_out"] = self.conv_out(
-            hidden_states, conv_cache=conv_cache.get("conv_out")
-        )
+        hidden_states, new_conv_cache["conv_out"] = self.conv_out(hidden_states, conv_cache=conv_cache.get("conv_out"))
 
         return hidden_states, new_conv_cache
 
@@ -1031,9 +999,7 @@ class CogVideoXDecoder3D(nn.Module):
             compress_time = i < temporal_compress_level
 
             if up_block_type != "CogVideoXUpBlock3D":
-                raise ValueError(
-                    "Invalid `up_block_type`. Must be `CogVideoXUpBlock3D`"
-                )
+                raise ValueError("Invalid `up_block_type`. Must be `CogVideoXUpBlock3D`")
 
             up_block = CogVideoXUpBlock3D(
                 in_channels=prev_output_channel,
@@ -1051,9 +1017,7 @@ class CogVideoXDecoder3D(nn.Module):
             )
             self.up_blocks.append(up_block)
 
-        self.norm_out = CogVideoXSpatialNorm3D(
-            reversed_block_out_channels[-1], in_channels, groups=norm_num_groups
-        )
+        self.norm_out = CogVideoXSpatialNorm3D(reversed_block_out_channels[-1], in_channels, groups=norm_num_groups)
         self.conv_act = nn.SiLU()
         self.conv_out = CogVideoXCausalConv3d(
             reversed_block_out_channels[-1], out_channels, kernel_size=3, pad_mode=pad_mode
@@ -1078,9 +1042,7 @@ class CogVideoXDecoder3D(nn.Module):
         new_conv_cache: Dict[str, mx.array] = {}
         conv_cache = conv_cache or {}
 
-        hidden_states, new_conv_cache["conv_in"] = self.conv_in(
-            sample, conv_cache=conv_cache.get("conv_in")
-        )
+        hidden_states, new_conv_cache["conv_in"] = self.conv_in(sample, conv_cache=conv_cache.get("conv_in"))
 
         # 1. Mid
         hidden_states, new_conv_cache["mid_block"] = self.mid_block(
@@ -1099,9 +1061,7 @@ class CogVideoXDecoder3D(nn.Module):
             hidden_states, sample, conv_cache=conv_cache.get("norm_out")
         )
         hidden_states = self.conv_act(hidden_states)
-        hidden_states, new_conv_cache["conv_out"] = self.conv_out(
-            hidden_states, conv_cache=conv_cache.get("conv_out")
-        )
+        hidden_states, new_conv_cache["conv_out"] = self.conv_out(hidden_states, conv_cache=conv_cache.get("conv_out"))
 
         return hidden_states, new_conv_cache
 
@@ -1168,6 +1128,7 @@ class AutoencoderKLCogVideoX(nn.Module):
 
     def encode(self, x: mx.array):
         from videox_fun_mlx.utils import DiagonalGaussianDistribution
+
         h, _ = self.encoder(x)
         return DiagonalGaussianDistribution(h)
 
@@ -1189,6 +1150,7 @@ class AutoencoderKLCogVideoX(nn.Module):
 
         # Priority: vae_config.json > config.json["vae"] > config.json
         import json as _json
+
         vae_config_file = os.path.join(pretrained_model_path, "vae_config.json")
         if os.path.exists(vae_config_file):
             with open(vae_config_file) as f:
@@ -1199,10 +1161,19 @@ class AutoencoderKLCogVideoX(nn.Module):
                 config = config["vae"]
 
         init_keys = {
-            "in_channels", "out_channels", "down_block_types", "up_block_types",
-            "block_out_channels", "latent_channels", "layers_per_block", "act_fn",
-            "norm_eps", "norm_num_groups", "temporal_compression_ratio",
-            "scaling_factor", "shift_factor",
+            "in_channels",
+            "out_channels",
+            "down_block_types",
+            "up_block_types",
+            "block_out_channels",
+            "latent_channels",
+            "layers_per_block",
+            "act_fn",
+            "norm_eps",
+            "norm_num_groups",
+            "temporal_compression_ratio",
+            "scaling_factor",
+            "shift_factor",
         }
         filtered_config = {k: v for k, v in config.items() if k in init_keys}
         for k in ("down_block_types", "up_block_types", "block_out_channels"):
